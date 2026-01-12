@@ -1,0 +1,54 @@
+{
+  "pcb_name": "LoadShedding_AC_Switch",
+  "description": "Mapping between FLIR component designators and thermistor channels for LoadShedding board",
+  "thermistor_to_flir_mapping": {
+    "AI0": {
+      "flir_component": "U3",
+      "component_type": "IC",
+      "notes": "Optoisolator"
+    },
+    "AI1": {
+      "flir_component": "U1",
+      "component_type": "PowerSupply",
+      "notes": "Power Supply"
+    },
+    "AI4": {
+      "flir_component": "J1",
+      "component_type": "Connector",
+      "notes": "Ambient Measurement"
+    },
+    "AI6": {
+      "flir_component": "R13",
+      "component_type": "Resistor",
+      "notes": "Resistor"
+    },
+    "AI7": {
+      "flir_component": "DL3",
+      "component_type": "LED",
+      "notes": "LED Indicator"
+    }
+  },
+  "available_flir_components": [
+    "C2", "C3", "C4", "C11", "C12", "C13",
+    "DL1", "DL2", "DL3", "DL4", "DL5", "DL6",
+    "F1", "F2",
+    "J1", "J2", "J3", "J4", "J5",
+    "L1", "L2", "L3", "L4",
+    "R1", "R2", "R3", "R4", "R5", "R6", "R7", "R8", "R9", "R10", "R11", "R12", "R13", "R14", "R15", "R16",
+    "S1", "S2", "S3", "S4",
+    "TP1", "TP2", "TP3", "TP4", "TP5", "TP6", "TP7", "TP8", "TP9", "TP10", "TP11",
+    "U1", "U2", "U3", "U4", "U5", "U6"
+  ],
+  "component_type_examples": [
+    "PowerSupply",
+    "LDO", 
+    "Resistor",
+    "LED",
+    "Inductor",
+    "Capacitor",
+    "Diode",
+    "IC",
+    "Connector",
+    "Switch"
+  ]
+}

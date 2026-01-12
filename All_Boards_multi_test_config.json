@@ -1,0 +1,204 @@
+{
+  "calibration_mode": "validation",
+  "boards": [
+    {
+      "name": "Load_Shedding",
+      "pcb": "Load_Shedding_Rev_E.brd",
+      "role": "calibration_source",
+      "plot_settings": {
+        "y_axis_min": 20,
+        "y_axis_max": 35,
+        "unified_y_axis": true,
+        "max_sand_time_hours": 7,
+        "max_air_time_hours": null,
+        "test2_truncate_hours": 2.3,
+        "air_test3_truncate_hours": null,
+        "flir_subplot_max_hours": null,
+        "air_subplot_max_hours": null,
+        "sand_subplot_max_hours": null
+      },
+      "tests": [
+        {
+          "test_id": "Test1_Air",
+          "therm_air_file": "inputs/Test_Air_Load_Shedding/Test 1/Test_3_AIR_usb_temp_DAQami.csv",
+          "therm_sand_file": "inputs/Test_Sand_Load_Shedding/Test 1/Test_3_SAND_usb_temp_DAQami.csv",
+          "pairs": [
+            {"flir_roi": "U3", "therm_channel": "AI0", "component": "U3", "type": "IC"},
+            {"flir_roi": "U1", "therm_channel": "AI1", "component": "U1", "type": "PowerSupply"},
+            {"flir_roi": "DL3", "therm_channel": "AI7", "component": "DL3", "type": "LED"},
+            {"flir_roi": "R13", "therm_channel": "AI6", "component": "R13", "type": "Resistor"},
+            {"flir_roi": "J1", "therm_channel": "AI4", "component": "J1", "type": "Connector"}
+          ]
+        },
+        {
+          "test_id": "Test2_Air",
+          "therm_air_file": [
+            "inputs/Test_Air_Load_Shedding/Test 2/Analog - 12-2-2025 11-21-18.5 AM.csv",
+            "inputs/Test_Air_Load_Shedding/Test 2/Analog - 12-2-2025 2-12-16.8 PM.csv"
+          ],
+          "air_pairs": [
+            {"flir_roi": "R15", "therm_channel": "Device0_AI1", "component": "R15", "type": "Resistor"},
+            {"flir_roi": "L1", "therm_channel": "Device0_AI7", "component": "L1", "type": "Inductor"},
+            {"flir_roi": "C4", "therm_channel": "Device0_AI6", "component": "C4", "type": "Capacitor"},
+            {"flir_roi": "U5", "therm_channel": "Device0_AI4", "component": "U5", "type": "LDO"},
+            {"flir_roi": "L3", "therm_channel": "Device1_AI1", "component": "L3", "type": "Inductor"},
+            {"flir_roi": "F1", "therm_channel": "Device1_AI7", "component": "F1", "type": "Diode"},
+            {"flir_roi": "F2", "therm_channel": "Device1_AI6", "component": "F2", "type": "Diode"},
+            {"flir_roi": "L4", "therm_channel": "Device1_AI4", "component": "L4", "type": "Inductor"}
+          ],
+          "therm_sand_file": [
+            "inputs/Test_Sand_Load_Shedding/Test 2/USB-TEMP (Device 0) - Analog - 12-4-2025 3-28-17.0 PM.csv",
+            "inputs/Test_Sand_Load_Shedding/Test 2/USB-TEMP-AI (Device 1) - Analog - 12-4-2025 3-28-17.1 PM.csv"
+          ],
+          "sand_pairs": [
+            {"flir_roi": "DL2", "therm_channel": "Device0_AI0", "component": "DL2", "type": "LED"},
+            {"flir_roi": "U4", "therm_channel": "Device0_AI1", "component": "U4", "type": "IC"},
+            {"flir_roi": "C2", "therm_channel": "Device0_AI4", "component": "C2", "type": "Capacitor"},
+            {"flir_roi": "U2", "therm_channel": "Device0_AI5", "component": "U2", "type": "IC"},
+            {"flir_roi": "L2", "therm_channel": "Device0_AI6", "component": "L2", "type": "Inductor"},
+            {"flir_roi": "C11", "therm_channel": "Device0_AI7", "component": "C11", "type": "Capacitor"},
+            {"flir_roi": "R5", "therm_channel": "Device1_AI4", "component": "R5", "type": "Resistor"},
+            {"flir_roi": "U6", "therm_channel": "Device1_AI5", "component": "U6", "type": "LDO"}
+          ]
+        },
+        {
+          "test_id": "Test3_Air",
+          "therm_air_file": [
+            "inputs/Test_Air_Load_Shedding/Test 3/Analog - 12-3-2025 11-41-52.0 AM.csv",
+            "inputs/Test_Air_Load_Shedding/Test 3/Analog - 12-3-2025 9-27-32.7 AM.csv"
+          ],
+          "air_pairs": [
+            {"flir_roi": "U2", "therm_channel": "Device0_AI1", "component": "U2", "type": "IC"},
+            {"flir_roi": "C2", "therm_channel": "Device0_AI7", "component": "C2", "type": "Capacitor"},
+            {"flir_roi": "C11", "therm_channel": "Device0_AI6", "component": "C11", "type": "Capacitor"},
+            {"flir_roi": "R5", "therm_channel": "Device0_AI4", "component": "R5", "type": "Resistor"},
+            {"flir_roi": "U6", "therm_channel": "Device1_AI1", "component": "U6", "type": "LDO"},
+            {"flir_roi": "L2", "therm_channel": "Device1_AI7", "component": "L2", "type": "Inductor"},
+            {"flir_roi": "DL2", "therm_channel": "Device1_AI6", "component": "DL2", "type": "LED"},
+            {"flir_roi": "U4", "therm_channel": "Device1_AI4", "component": "U4", "type": "IC"}
+          ],
+          "therm_sand_file": [
+            "inputs/Test_Sand_Load_Shedding/Test 3/USB-TEMP (Device 0) - Analog - 12-8-2025 5-09-10.9 PM.csv",
+            "inputs/Test_Sand_Load_Shedding/Test 3/USB-TEMP-AI (Device 1) - Analog - 12-8-2025 5-09-11.0 PM.csv"
+          ],
+          "sand_pairs": [
+            {"flir_roi": "F2", "therm_channel": "Device0_AI0", "component": "F2", "type": "Diode"},
+            {"flir_roi": "U5", "therm_channel": "Device0_AI1", "component": "U5", "type": "LDO"},
+            {"flir_roi": "L2", "therm_channel": "Device0_AI5", "component": "L2", "type": "Inductor"},
+            {"flir_roi": "R15", "therm_channel": "Device0_AI6", "component": "R15", "type": "Resistor"},
+            {"flir_roi": "C4", "therm_channel": "Device0_AI7", "component": "C4", "type": "Capacitor"},
+            {"flir_roi": "L1", "therm_channel": "Device1_AI4", "component": "L1", "type": "Inductor"},
+            {"flir_roi": "L3", "therm_channel": "Device1_AI5", "component": "L3", "type": "Inductor"}
+          ]
+        }
+      ]
+    },
+    {
+      "name": "HBridge_15s",
+      "pcb": "H_Bridge_Sensing_Rev_C.brd",
+      "role": "calibration_source",
+      "plot_settings": {
+        "y_axis_min": 20,
+        "y_axis_max": 70,
+        "unified_y_axis": true,
+        "max_sand_time_hours": 36,
+        "max_air_time_hours": null,
+        "test2_truncate_hours": null,
+        "air_test3_truncate_hours": 0.6,
+        "flir_subplot_max_hours": null,
+        "air_subplot_max_hours": null,
+        "sand_subplot_max_hours": null
+      },      "tests": [
+        {
+          "test_id": "Test1_Air",
+          "therm_air_file": [
+            "inputs/Test_Air_HBridge_Sensing/Test 1/USB-TEMP (Device 0) - Analog - 12-8-2025 3-22-55.1 PM.csv",
+            "inputs/Test_Air_HBridge_Sensing/Test 1/USB-TEMP-AI (Device 1) - Analog - 12-8-2025 3-22-55.2 PM.csv"
+          ],
+          "air_pairs": [
+            {"flir_roi": "DL13", "therm_channel": "Device0_AI0", "component": "DL13", "type": "LED"},
+            {"flir_roi": "PS2", "therm_channel": "Device0_AI1", "component": "PS2", "type": "PowerSupply"},
+            {"flir_roi": "PS3", "therm_channel": "Device0_AI4", "component": "PS3", "type": "PowerSupply"},
+            {"flir_roi": "DL10", "therm_channel": "Device0_AI5", "component": "DL10", "type": "LED"},
+            {"flir_roi": "PS1", "therm_channel": "Device0_AI6", "component": "PS1", "type": "PowerSupply"},
+            {"flir_roi": "DL11", "therm_channel": "Device0_AI7", "component": "DL11", "type": "LED"},
+            {"flir_roi": "R88", "therm_channel": "Device1_AI4", "component": "R88", "type": "Resistor"},
+            {"flir_roi": "U34", "therm_channel": "Device1_AI5", "component": "U34", "type": "IC"}
+          ],
+          "therm_sand_file": [
+            "inputs/Test_Sand_HBridge_Sensing/Test 1/USB-TEMP (Device 0) - Analog - 1-3-2026 8-22-27.8 PM.csv",
+            "inputs/Test_Sand_HBridge_Sensing/Test 1/USB-TEMP-AI (Device 1) - Analog - 1-3-2026 8-22-27.8 PM.csv"
+          ],
+          "sand_pairs": [
+            {"flir_roi": "DL13", "therm_channel": "Device0_AI0", "component": "DL13", "type": "LED"},
+            {"flir_roi": "PS2", "therm_channel": "Device0_AI1", "component": "PS2", "type": "PowerSupply"},
+            {"flir_roi": "PS3", "therm_channel": "Device0_AI4", "component": "PS3", "type": "PowerSupply"},
+            {"flir_roi": "DL10", "therm_channel": "Device0_AI5", "component": "DL10", "type": "LED"},
+            {"flir_roi": "PS1", "therm_channel": "Device0_AI6", "component": "PS1", "type": "PowerSupply"},
+            {"flir_roi": "DL11", "therm_channel": "Device0_AI7", "component": "DL11", "type": "LED"},
+            {"flir_roi": "R88", "therm_channel": "Device1_AI4", "component": "R88", "type": "Resistor"},
+            {"flir_roi": "U34", "therm_channel": "Device1_AI5", "component": "U34", "type": "IC"}
+          ]
+        },
+        {
+          "test_id": "Test2_Air",
+          "therm_air_file": [
+            "inputs/Test_Air_HBridge_Sensing/Test 2/USB-TEMP (Device 0) - Analog - 12-9-2025 12-00-39.4 PM.csv",
+            "inputs/Test_Air_HBridge_Sensing/Test 2/USB-TEMP-AI (Device 1) - Analog - 12-9-2025 12-00-39.4 PM.csv"
+          ],
+          "air_pairs": [
+            {"flir_roi": "U5", "therm_channel": "Device0_AI1", "component": "U5", "type": "IC"},
+            {"flir_roi": "U40", "therm_channel": "Device0_AI4", "component": "U40", "type": "IC"},
+            {"flir_roi": "U29", "therm_channel": "Device0_AI5", "component": "U29", "type": "IC"},
+            {"flir_roi": "U26", "therm_channel": "Device0_AI6", "component": "U26", "type": "IC"},
+            {"flir_roi": "U33", "therm_channel": "Device0_AI7", "component": "U33", "type": "IC"},
+            {"flir_roi": "U4", "therm_channel": "Device1_AI4", "component": "U4", "type": "IC"},
+            {"flir_roi": "U32", "therm_channel": "Device1_AI5", "component": "U32", "type": "IC"}
+          ],
+          "therm_sand_file": [
+            "inputs/Test_Sand_HBridge_Sensing/Test 2/USB-TEMP (Device 0) - Analog - 1-1-2026 2-13-25.5 PM.csv",
+            "inputs/Test_Sand_HBridge_Sensing/Test 2/USB-TEMP-AI (Device 1) - Analog - 1-1-2026 2-13-25.6 PM.csv"
+          ],
+          "sand_pairs": [
+            {"flir_roi": "U5", "therm_channel": "Device0_AI1", "component": "U5", "type": "IC"},
+            {"flir_roi": "U40", "therm_channel": "Device0_AI4", "component": "U40", "type": "IC"},
+            {"flir_roi": "U29", "therm_channel": "Device0_AI5", "component": "U29", "type": "IC"},
+            {"flir_roi": "U26", "therm_channel": "Device0_AI6", "component": "U26", "type": "IC"},
+            {"flir_roi": "U33", "therm_channel": "Device0_AI7", "component": "U33", "type": "IC"},
+            {"flir_roi": "U4", "therm_channel": "Device1_AI4", "component": "U4", "type": "IC"},
+            {"flir_roi": "U32", "therm_channel": "Device1_AI5", "component": "U32", "type": "IC"}
+          ]
+        },
+        {
+          "test_id": "Test3_Air",
+          "therm_air_file": [
+            "inputs/Test_Air_HBridge_Sensing/Test 3/USB-TEMP (Device 0) - Analog - 12-30-2025 11-07-11.7 AM.csv",
+            "inputs/Test_Air_HBridge_Sensing/Test 3/USB-TEMP-AI (Device 1) - Analog - 12-30-2025 11-07-11.7 AM.csv"
+          ],
+          "air_pairs": [
+            {"flir_roi": "U6", "therm_channel": "Device0_AI1", "component": "U6", "type": "IC"},
+            {"flir_roi": "U23", "therm_channel": "Device0_AI4", "component": "U23", "type": "IC"},
+            {"flir_roi": "U19", "therm_channel": "Device0_AI5", "component": "U19", "type": "IC"},
+            {"flir_roi": "U8", "therm_channel": "Device0_AI6", "component": "U8", "type": "IC"},
+            {"flir_roi": "U13", "therm_channel": "Device0_AI7", "component": "U13", "type": "IC"},
+            {"flir_roi": "R5", "therm_channel": "Device1_AI4", "component": "R5", "type": "Resistor"},
+            {"flir_roi": "U12", "therm_channel": "Device1_AI5", "component": "U12", "type": "IC"}
+          ],
+          "therm_sand_file": [
+            "inputs/Test_Sand_HBridge_Sensing/Test 3/USB-TEMP (Device 0) - Analog - 12-30-2025 1-42-25.2 PM.csv",
+            "inputs/Test_Sand_HBridge_Sensing/Test 3/USB-TEMP-AI (Device 1) - Analog - 12-30-2025 1-42-25.3 PM.csv"
+          ],
+          "sand_pairs": [
+            {"flir_roi": "U6", "therm_channel": "Device0_AI1", "component": "U6", "type": "IC"},
+            {"flir_roi": "U23", "therm_channel": "Device0_AI4", "component": "U23", "type": "IC"},
+            {"flir_roi": "U19", "therm_channel": "Device0_AI5", "component": "U19", "type": "IC"},
+            {"flir_roi": "U8", "therm_channel": "Device0_AI6", "component": "U8", "type": "IC"},
+            {"flir_roi": "U13", "therm_channel": "Device0_AI7", "component": "U13", "type": "IC"},
+            {"flir_roi": "R5", "therm_channel": "Device1_AI4", "component": "R5", "type": "Resistor"},
+            {"flir_roi": "U12", "therm_channel": "Device1_AI5", "component": "U12", "type": "IC"}
+          ]
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,17 @@
+{
+  "sessions": [
+    {
+      "name": "Test_Invalid_Config",
+      "pcb": "TestPCB",
+      "flir_file": "nonexistent_file.csv",
+      "therm_air_file": [
+        "nonexistent_air1.csv",
+        "nonexistent_air2.csv"
+      ],
+      "pairs": [
+        ["U1", "AI0", "U1", "IC"],
+        ["R1", "AI1", "R1", "Resistor"]
+      ]
+    }
+  ]
+}

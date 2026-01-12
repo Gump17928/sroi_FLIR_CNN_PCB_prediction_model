@@ -1,0 +1,100 @@
+{
+  "boards": [
+    {
+      "name": "HBridge_Sensing",
+      "pcb": "H_Bridge_Sensing_Rev_C.brd",
+      "tests": [
+        {
+          "test_id": "Test1_Air",
+          "therm_air_file": [
+            "inputs/Test_Air_HBridge_Sensing/Test 1/USBTEMP_air.csv",
+            "inputs/Test_Air_HBridge_Sensing/Test 1/USBTEMPAI_air.csv"
+          ],
+          "air_pairs": [
+            {"flir_roi": "DL13", "therm_channel": "Device0_AI0", "component": "DL13", "type": "LED"},
+            {"flir_roi": "PS1", "therm_channel": "Device0_AI1", "component": "PS1", "type": "PowerSupply"},
+            {"flir_roi": "PS3", "therm_channel": "Device0_AI4", "component": "PS3", "type": "PowerSupply"},
+            {"flir_roi": "DL10", "therm_channel": "Device0_AI5", "component": "DL10", "type": "LED"},
+            {"flir_roi": "PS1", "therm_channel": "Device0_AI6", "component": "PS1", "type": "PowerSupply"},
+            {"flir_roi": "DL11", "therm_channel": "Device0_AI7", "component": "DL11", "type": "LED"},
+            {"flir_roi": "R88", "therm_channel": "Device1_AI4", "component": "R88", "type": "Resistor"},
+            {"flir_roi": "U34", "therm_channel": "Device1_AI5", "component": "U34", "type": "IC"}
+          ],
+          "therm_sand_file": [
+            "inputs/Test_Sand_HBridge_Sensing/Test 1/USBTEMP_sand.csv",
+            "inputs/Test_Sand_HBridge_Sensing/Test 1/USBTEMPAI_sand.csv"
+          ],
+          "sand_pairs": [
+            {"flir_roi": "DL13", "therm_channel": "Device0_AI0", "component": "DL13", "type": "LED"},
+            {"flir_roi": "PS2", "therm_channel": "Device0_AI1", "component": "PS2", "type": "PowerSupply"},
+            {"flir_roi": "PS3", "therm_channel": "Device0_AI4", "component": "PS3", "type": "PowerSupply"},
+            {"flir_roi": "DL10", "therm_channel": "Device0_AI5", "component": "DL10", "type": "LED"},
+            {"flir_roi": "PS1", "therm_channel": "Device0_AI6", "component": "PS1", "type": "PowerSupply"},
+            {"flir_roi": "DL11", "therm_channel": "Device0_AI7", "component": "DL11", "type": "LED"},
+            {"flir_roi": "R88", "therm_channel": "Device1_AI4", "component": "R88", "type": "Resistor"},
+            {"flir_roi": "U34", "therm_channel": "Device1_AI5", "component": "U34", "type": "IC"}
+          ]
+        },
+        {
+          "test_id": "Test2_Air",
+          "therm_air_file": [
+            "inputs/Test_Air_HBridge_Sensing/Test 2/USBTEMP_air.csv",
+            "inputs/Test_Air_HBridge_Sensing/Test 2/USBTEMPAI_air.csv"
+          ],
+          "air_pairs": [
+            {"flir_roi": "U5", "therm_channel": "Device0_AI1", "component": "U5", "type": "IC"},
+            {"flir_roi": "U40", "therm_channel": "Device0_AI4", "component": "U40", "type": "IC"},
+            {"flir_roi": "U29", "therm_channel": "Device0_AI5", "component": "U29", "type": "IC"},
+            {"flir_roi": "U26", "therm_channel": "Device0_AI6", "component": "U26", "type": "IC"},
+            {"flir_roi": "U33", "therm_channel": "Device0_AI7", "component": "U33", "type": "IC"},
+            {"flir_roi": "U4", "therm_channel": "Device1_AI4", "component": "U4", "type": "IC"},
+            {"flir_roi": "U32", "therm_channel": "Device1_AI5", "component": "U32", "type": "IC"}
+          ],
+          "therm_sand_file": [
+            "inputs/Test_Sand_HBridge_Sensing/Test 2/USBTEMP_sand.csv",
+            "inputs/Test_Sand_HBridge_Sensing/Test 2/USBTEMPAI_sand.csv"
+          ],
+          "sand_pairs": [
+            {"flir_roi": "U5", "therm_channel": "Device0_AI1", "component": "U5", "type": "IC"},
+            {"flir_roi": "U40", "therm_channel": "Device0_AI4", "component": "U40", "type": "IC"},
+            {"flir_roi": "U29", "therm_channel": "Device0_AI5", "component": "U29", "type": "IC"},
+            {"flir_roi": "U26", "therm_channel": "Device0_AI6", "component": "U26", "type": "IC"},
+            {"flir_roi": "U33", "therm_channel": "Device0_AI7", "component": "U33", "type": "IC"},
+            {"flir_roi": "U4", "therm_channel": "Device1_AI4", "component": "U4", "type": "IC"},
+            {"flir_roi": "U32", "therm_channel": "Device1_AI5", "component": "U32", "type": "IC"}
+          ]
+        },
+        {
+          "test_id": "Test3_Air",
+          "therm_air_file": [
+            "inputs/Test_Air_HBridge_Sensing/Test 3/USBTEMP_air.csv",
+            "inputs/Test_Air_HBridge_Sensing/Test 3/USBTEMPAI_air.csv"
+          ],
+          "air_pairs": [
+            {"flir_roi": "U6", "therm_channel": "Device0_AI1", "component": "U6", "type": "IC"},
+            {"flir_roi": "U23", "therm_channel": "Device0_AI4", "component": "U23", "type": "IC"},
+            {"flir_roi": "U19", "therm_channel": "Device0_AI5", "component": "U19", "type": "IC"},
+            {"flir_roi": "U8", "therm_channel": "Device0_AI6", "component": "U8", "type": "IC"},
+            {"flir_roi": "U13", "therm_channel": "Device0_AI7", "component": "U13", "type": "IC"},
+            {"flir_roi": "R5", "therm_channel": "Device1_AI4", "component": "R5", "type": "Resistor"},
+            {"flir_roi": "U12", "therm_channel": "Device1_AI5", "component": "U12", "type": "IC"}
+          ],
+          "therm_sand_file": [
+            "inputs/Test_Sand_HBridge_Sensing/Test 3/USBTEMP_sand.csv",
+            "inputs/Test_Sand_HBridge_Sensing/Test 3/USBTEMPAI_sand.csv"
+          ],
+          "sand_pairs": [
+            {"flir_roi": "U6", "therm_channel": "Device0_AI1", "component": "U6", "type": "IC"},
+            {"flir_roi": "U23", "therm_channel": "Device0_AI4", "component": "U23", "type": "IC"},
+            {"flir_roi": "U19", "therm_channel": "Device0_AI5", "component": "U19", "type": "IC"},
+            {"flir_roi": "U8", "therm_channel": "Device0_AI6", "component": "U8", "type": "IC"},
+            {"flir_roi": "U13", "therm_channel": "Device0_AI7", "component": "U13", "type": "IC"},
+            {"flir_roi": "R5", "therm_channel": "Device1_AI4", "component": "R5", "type": "Resistor"},
+            {"flir_roi": "U12", "therm_channel": "Device1_AI5", "component": "U12", "type": "IC"}
+          ]
+        }
+      ]
+    }
+  ]
+}
+

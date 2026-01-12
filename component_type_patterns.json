@@ -1,0 +1,95 @@
+{
+  "description": "Component type classification patterns for thermal prediction",
+  "patterns": {
+    "PowerSupply": [
+      "^PS\\d+$",
+      "^CONV$",
+      "^POWER.*",
+      ".*SUPPLY.*"
+    ],
+    "IC": [
+      "^U\\d+$",
+      "^IC\\d+$",
+      "^PROC.*",
+      "^MCU.*",
+      "^CPU.*"
+    ],
+    "Resistor": [
+      "^R\\d+$",
+      "^RES\\d+$",
+      "^RST.*",
+      ".*RESISTOR.*"
+    ],
+    "LED": [
+      "^DL\\d+$",
+      "^LED\\d+$",
+      "^CR\\d+$",
+      "^D\\d+$"
+    ],
+    "Capacitor": [
+      "^C\\d+$",
+      "^CAP\\d+$",
+      ".*VOLTAGE.*",
+      "^Vdc.*",
+      "^SCLK$"
+    ],
+    "Inductor": [
+      "^L\\d+$",
+      "^IND\\d+$",
+      "^CHOKE.*"
+    ],
+    "Connector": [
+      "^J\\d+$",
+      "^CONN\\d+$",
+      "^P\\d+$"
+    ],
+    "Switch": [
+      "^SW\\d+$",
+      "^S\\d+$",
+      "^SWITCH.*"
+    ],
+    "Fuse": [
+      "^F\\d+$",
+      "^FUSE\\d+$"
+    ],
+    "TestPoint": [
+      "^TP\\d+$",
+      "^TEST.*"
+    ],
+    "VoltageRegulator": [
+      "^VR\\d+$",
+      "^VREG.*",
+      "^LDO\\d+$"
+    ],
+    "Unknown": [
+      "^GND$",
+      "^FAULT$",
+      ".*LIMIT$",
+      ".*HIGH$",
+      ".*LOW$",
+      ".*RTD.*",
+      "^DATA.*",
+      "^Iac.*",
+      "^Idc.*"
+    ]
+  },
+  "priority_order": [
+    "PowerSupply",
+    "VoltageRegulator",
+    "IC",
+    "Resistor",
+    "LED",
+    "Capacitor",
+    "Inductor",
+    "Connector",
+    "Switch",
+    "Fuse",
+    "TestPoint",
+    "Unknown"
+  ],
+  "notes": {
+    "pattern_syntax": "Python regex patterns - use ^ for start, $ for end, .* for wildcard",
+    "priority_order": "First matching pattern wins - order matters for ambiguous names",
+    "calibration_types": "Only PowerSupply, IC, Resistor, LED currently have calibration data"
+  }
+}

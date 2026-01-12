@@ -1,0 +1,57 @@
+{
+  "description": "Multi-session calibration configuration example",
+  "usage": "python researchir_post_processor.py --thermal_modeling --multi_session_config multi_session_config_example.json --convergence_analysis",
+  "sessions": [
+    {
+      "name": "LoadShedding_Week1",
+      "pcb": "LoadShedding_RevA",
+      "flir_file": "outputs/Load_Shedding/Load_Shedding_FLIR_AllComponents.csv",
+      "therm_air_file": "inputs/LoadShedding_Week1_AIR_usb_temp_001.csv",
+      "therm_sand_file": null,
+      "pairs": [
+        ["R1", "AI1", "R1", "Resistor"],
+        ["R5", "AI2", "R5", "Resistor"],
+        ["R13", "AI3", "R13", "Resistor"],
+        ["C3", "AI4", "C3", "Capacitor"],
+        ["U2", "AI5", "U2", "IC"],
+        ["DL3", "AI6", "DL3", "LED"]
+      ]
+    },
+    {
+      "name": "LoadShedding_Week2",
+      "pcb": "LoadShedding_RevA",
+      "flir_file": "outputs/Load_Shedding/Load_Shedding_FLIR_AllComponents.csv",
+      "therm_air_file": "inputs/LoadShedding_Week2_AIR_usb_temp_001.csv",
+      "therm_sand_file": null,
+      "pairs": [
+        ["R8", "AI1", "R8", "Resistor"],
+        ["R25", "AI2", "R25", "Resistor"],
+        ["C12", "AI3", "C12", "Capacitor"],
+        ["C22", "AI4", "C22", "Capacitor"],
+        ["U5", "AI5", "U5", "IC"],
+        ["U7", "AI6", "U7", "IC"],
+        ["DL5", "AI7", "DL5", "LED"],
+        ["DL8", "AI8", "DL8", "LED"]
+      ]
+    },
+    {
+      "name": "LoadShedding_Week3_Sand",
+      "pcb": "LoadShedding_RevA",
+      "flir_file": "outputs/Load_Shedding/Load_Shedding_FLIR_AllComponents.csv",
+      "therm_air_file": "inputs/LoadShedding_Week3_AIR_usb_temp_001.csv",
+      "therm_sand_file": "inputs/LoadShedding_Week3_SAND_usb_temp_001.csv",
+      "pairs": [
+        ["R1", "AI1", "R1", "Resistor"],
+        ["R5", "AI2", "R5", "Resistor"],
+        ["U2", "AI5", "U2", "IC"]
+      ]
+    }
+  ],
+  "notes": [
+    "Week 1: Initial 6 components with air cooling only",
+    "Week 2: Added 8 more components, still air cooling only",
+    "Week 3: Sand cooling test for subset of components",
+    "Each pair is: [flir_component_name, thermistor_channel, display_name, component_type]",
+    "Set therm_sand_file to null if sand cooling not performed for that session"
+  ]
+}

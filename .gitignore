@@ -1,0 +1,109 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual Environment
+venv/
+env/
+ENV/
+.venv
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.project
+.pydevproject
+.settings/
+
+# Outputs (generated results)
+outputs/*
+!outputs/.gitkeep
+
+# Temporary files
+*.tmp
+*.log
+*.bak
+MIGRATION_REPORT_*.txt
+
+# Large data files (keep examples only)
+*.csv
+!component_type_patterns.json
+!loadshedding_thermistor_mapping.json
+!*_multi_test_config.json
+!multi_session_config_example.json
+
+# Large input directories (document in README how to obtain)
+inputs/ResearchIR_Outputs_*/
+inputs/Test_Air_*/
+inputs/Test_Sand_*/
+inputs/Thermistor_Old_Results/
+inputs/inputs_sroi/
+
+# Keep example/template files
+!inputs/*_enhanced.csv
+!inputs/Pick_Place_*.csv
+
+# OS-specific
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+desktop.ini
+
+# Jupyter Notebook
+.ipynb_checkpoints
+*.ipynb
+
+# Documentation build
+docs/_build/
+docs/_static/
+docs/_templates/
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+
+# Machine Learning Models (large binary files)
+*.pkl
+*.h5
+*.hdf5
+!*_example.pkl
+
+# Backup folders - exclude large files
+backup/**/*.zip
+backup/**/*.seq
+backup/**/ResearchIR_Outputs_*/
+backup/inputs/
+backup/outputs/
+backup/reorganization_backup_*/
+backup/pre_gitlab_migration_*/
+
+# Keep important backups documented in GITLAB_CLEANUP_SUMMARY.md
+# but can be removed after verified migration

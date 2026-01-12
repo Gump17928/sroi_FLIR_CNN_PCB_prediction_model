@@ -1,0 +1,72 @@
+{
+  "custom_component_types": {
+    "FB": {
+      "name": "Ferrite Beads",
+      "color": "#ff6b6b",
+      "marker": "^"
+    },
+    "F": {
+      "name": "Fuses",
+      "color": "#4ecdc4",
+      "marker": "s"
+    },
+    "Y": {
+      "name": "Crystal Oscillators",
+      "color": "#45b7d1",
+      "marker": "D"
+    },
+    "XTAL": {
+      "name": "Crystals",
+      "color": "#96ceb4",
+      "marker": "o"
+    },
+    "PAD": {
+      "name": "Pads/Contacts",
+      "color": "#feca57",
+      "marker": "x"
+    },
+    "MH": {
+      "name": "Mounting Holes",
+      "color": "#ff9ff3",
+      "marker": "+"
+    },
+    "H": {
+      "name": "Hardware",
+      "color": "#54a0ff",
+      "marker": "*"
+    },
+    "LDO": {
+      "name": "Linear Regulators",
+      "color": "#5f27cd",
+      "marker": "p"
+    },
+    "BUCK": {
+      "name": "Buck Converters",
+      "color": "#00d2d3",
+      "marker": "h"
+    },
+    "BOOST": {
+      "name": "Boost Converters",
+      "color": "#ff6348",
+      "marker": "v"
+    }
+  },
+  "pattern_rules": {
+    "^(FB|FERR)\\d*": "FB",
+    "^(X|XTAL)\\d*": "XTAL",
+    "^Y\\d*": "Y",
+    "^(F|FUSE)\\d*": "F",
+    "^(P|PAD)\\d*": "PAD",
+    "^(MH|HOLE)\\d*": "MH",
+    "^H\\d*": "H",
+    ".*LDO.*": "LDO",
+    ".*BUCK.*": "BUCK",
+    ".*BOOST.*": "BOOST"
+  },
+  "grouping_options": {
+    "merge_similar_types": true,
+    "min_components_per_group": 1,
+    "max_components_per_plot": 20,
+    "auto_detect_patterns": true
+  }
+}
