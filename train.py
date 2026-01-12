@@ -7,6 +7,7 @@ This script trains the CNN model on thermal images of PCBs.
 import os
 import argparse
 import numpy as np
+from tensorflow.keras.callbacks import ModelCheckpoint, EarlyStopping, ReduceLROnPlateau
 from model import PCBThermalCNN
 from data_loader import ThermalDataLoader
 from sklearn.model_selection import train_test_split
@@ -54,8 +55,6 @@ def train_model(data_dir, epochs=50, batch_size=32, learning_rate=0.001,
     pcb_cnn.get_model_summary()
     
     # Define callbacks
-    from tensorflow.keras.callbacks import ModelCheckpoint, EarlyStopping, ReduceLROnPlateau
-    
     callbacks = [
         ModelCheckpoint(
             model_save_path,

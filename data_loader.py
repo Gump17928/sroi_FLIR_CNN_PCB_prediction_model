@@ -7,6 +7,7 @@ for the CNN model.
 
 import os
 import numpy as np
+import cv2
 from sroi_parser import load_sroi_file
 
 
@@ -68,8 +69,6 @@ class ThermalDataLoader:
         Returns:
             numpy.ndarray: Preprocessed image
         """
-        import cv2
-        
         # Resize image
         resized = cv2.resize(image, target_size, interpolation=cv2.INTER_LINEAR)
         
@@ -97,7 +96,15 @@ class ThermalDataLoader:
             return np.array([])
         
         preprocessed = []
-        for img in images:
-            preprocessed.append(self.preprocess_image(img, target_size))
+        valid_indices = []
+        for i, img in enumerate(images):
+            try:
+                preprocessed.append(self.preprocess_image(img, target_size))
+                valid_indices.append(i)
+            except Exception as e:
+                print(f"Error preprocessing image {self.file_list[i]}: {str(e)}")
+        
+        # Update file_list to only include successfully preprocessed images
+        self.file_list = [self.file_list[i] for i in valid_indices]
         
         return np.array(preprocessed)

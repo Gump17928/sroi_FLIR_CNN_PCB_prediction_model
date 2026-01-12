@@ -7,9 +7,10 @@ This script uses a trained model to predict thermal temperatures from new images
 import os
 import argparse
 import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
 from model import PCBThermalCNN
 from data_loader import ThermalDataLoader
-import matplotlib.pyplot as plt
 
 
 def predict_temperature(model_path, image_path, visualize=True):
@@ -109,7 +110,6 @@ def batch_predict(model_path, data_dir, output_csv='predictions.csv'):
         print(f"{os.path.basename(filepath)}: {pred[0]:.2f}°C")
     
     # Save to CSV
-    import pandas as pd
     df = pd.DataFrame(results)
     df.to_csv(output_csv, index=False)
     print(f"\nPredictions saved to {output_csv}")
