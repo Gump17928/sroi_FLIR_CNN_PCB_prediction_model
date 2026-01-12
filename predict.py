@@ -11,6 +11,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 from model import PCBThermalCNN
 from data_loader import ThermalDataLoader
+from sroi_parser import load_sroi_file
 
 
 def predict_temperature(model_path, image_path, visualize=True):
@@ -33,7 +34,6 @@ def predict_temperature(model_path, image_path, visualize=True):
     data_loader = ThermalDataLoader(os.path.dirname(image_path))
     
     if image_path.endswith('.sroi'):
-        from sroi_parser import load_sroi_file
         thermal_image = load_sroi_file(image_path)
     else:
         raise ValueError("Unsupported file format. Please provide a .sroi file.")

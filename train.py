@@ -36,8 +36,12 @@ def train_model(data_dir, epochs=50, batch_size=32, learning_rate=0.001,
     
     print(f"Loaded {len(images)} thermal images")
     
-    # For demonstration, create dummy temperature labels
-    # In real scenario, these should be loaded from annotations
+    # NOTE: This is placeholder code for demonstration purposes.
+    # In a real scenario, you must replace this with actual temperature labels
+    # loaded from your annotations/ground truth data (e.g., CSV file, JSON, or database).
+    # Using random labels will result in a model that cannot learn meaningful patterns.
+    print("\nWARNING: Using random placeholder labels for demonstration.")
+    print("Replace this with your actual labeled data for real training!")
     labels = np.random.rand(len(images)) * 100  # Random temps between 0-100°C
     
     # Split data into training and validation sets
