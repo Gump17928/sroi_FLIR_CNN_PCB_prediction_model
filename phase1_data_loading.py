@@ -1,16 +1,4 @@
-"""
-===============================================================================
-PHASE 1: DATA LOADING
-===============================================================================
-Loads and parses ResearchIR thermal test data exports.
-
-This module handles:
-- Loading ResearchIR stats TXT files
-- Parsing component temperature data
-- Creating time-series DataFrames for each component
-- Component classification by type (R, C, U, VR, etc.)
-===============================================================================
-"""
+"""Phase 1: Data Loading - Load and parse ResearchIR thermal test data exports."""
 
 import os
 import re
@@ -42,35 +30,13 @@ DEFAULT_COMPONENT_TYPES = {
 
 
 def load_researchir_files(input_folder: str, debug: bool = False) -> Dict:
-    """
-    Load all ResearchIR stats TXT files from export folder
-    
-    ResearchIR exports multi-frame thermal data as TXT files with statistics
-    for each ROI (component). This function parses these files and creates
-    time-series temperature data for each component.
-    
-    Args:
-        input_folder: Path to folder containing ResearchIR exports
-        debug: Enable verbose debug output
-    
-    Returns:
-        Dictionary mapping component names to pandas DataFrames with columns:
-        - Time: Time in seconds
-        - Temperature: Temperature in Celsius
-    
-    Raises:
-        FileNotFoundError: If input folder doesn't exist
-        ValueError: If no valid stats files found or no data loaded
-    """
+    """Load ResearchIR stats TXT files and create time-series DataFrames for each component."""
     
     if not os.path.exists(input_folder):
         raise FileNotFoundError(f"Input folder not found: {input_folder}")
     
-    # Find TXT stat files (these contain the component temperature data we need)
     txt_files = glob.glob(os.path.join(input_folder, "*Stats.txt"))
-    
     if not txt_files:
-        # Fallback: look for any TXT files
         txt_files = glob.glob(os.path.join(input_folder, "*.txt"))
         
     if not txt_files:
@@ -87,20 +53,16 @@ def load_researchir_files(input_folder: str, debug: bool = False) -> Dict:
             if debug:
                 print(f"Processing {filename}")
             
-            # Parse ResearchIR stats file
             component_temps = parse_researchir_stats_file(file_path, debug=debug)
             
             if component_temps:
-                # Create time series data for each component
                 for component_name, temp_value in component_temps.items():
                     if component_name not in component_data:
                         component_data[component_name] = []
                     
-                    # Build time series (ResearchIR exports one stats file per frame)
-                    # Each file represents a time point in the thermal test
                     time_point = len(component_data[component_name])
                     component_data[component_name].append({
-                        'Time': time_point * 60,  # Time in seconds (assuming 1 min intervals)
+                        'Time': time_point * 60,  # Time in seconds
                         'Temperature': temp_value
                     })
             
@@ -136,38 +98,20 @@ def load_researchir_files(input_folder: str, debug: bool = False) -> Dict:
 
 
 def parse_researchir_stats_file(file_path: str, debug: bool = False) -> Dict[str, float]:
-    """
-    Parse ResearchIR stats TXT file format
-    
-    ResearchIR stats files are space-delimited tables with:
-    - Header row with component names
-    - Multiple statistic rows (Mean, Min, Max, etc.)
-    
-    This function extracts the Mean temperature for each component.
-    
-    Args:
-        file_path: Path to ResearchIR stats TXT file
-        debug: Enable verbose debug output
-    
-    Returns:
-        Dictionary mapping component names to mean temperatures (Celsius)
-    """
+    """Parse ResearchIR stats TXT file and extract mean temperature for each component."""
     
     component_temps = {}
     
     with open(file_path, 'r') as f:
         lines = f.readlines()
     
-    # Find the header and mean temperature lines
     header_line = None
     mean_line = None
     
     for i, line in enumerate(lines):
         line_stripped = line.strip()
-        # Look for the header with component names (first line)
         if i == 0 and 'Statistic' in line_stripped:
             header_line = line_stripped
-        # Look for mean temperature row
         elif 'Mean [C]' in line_stripped or 'Mean [°C]' in line_stripped:
             mean_line = line_stripped
             break
@@ -177,8 +121,6 @@ def parse_researchir_stats_file(file_path: str, debug: bool = False) -> Dict[str
             print(f"Could not find header or mean temperature line in {file_path}")
         return component_temps
     
-    # Parse ResearchIR space-delimited format
-    # Use regex to split on multiple whitespace characters (2 or more spaces)
     header_parts = re.split(r'\s{2,}', header_line.strip())
     mean_parts = re.split(r'\s{2,}', mean_line.strip())
     
@@ -186,14 +128,12 @@ def parse_researchir_stats_file(file_path: str, debug: bool = False) -> Dict[str
         print(f"Header parts: {len(header_parts)}")
         print(f"Mean parts: {len(mean_parts)}")
     
-    # Skip the first column (statistic description like "Mean [C]")
-    start_idx = 1
+    start_idx = 1  # Skip statistic description column
     
     for i in range(start_idx, min(len(header_parts), len(mean_parts))):
         component_name = header_parts[i].strip()
         temp_str = mean_parts[i].strip()
         
-        # Skip non-component columns and empty names
         if component_name.lower() in ['image', 'statistic', 'n/a', ''] or not component_name:
             continue
         
@@ -214,26 +154,7 @@ def parse_researchir_stats_file(file_path: str, debug: bool = False) -> Dict[str
 
 def classify_components(component_data: Dict, custom_groups: Optional[Dict] = None,
                        debug: bool = False) -> Dict:
-    """
-    Classify components by type based on designator prefixes
-    
-    Groups components using standard PCB designator prefixes:
-    - R: Resistors
-    - C: Capacitors
-    - U/IC: Integrated Circuits
-    - VR: Voltage Regulators
-    - J: Connectors
-    - etc.
-    
-    Args:
-        component_data: Dictionary of component DataFrames from load_researchir_files()
-        custom_groups: Optional dict to override/extend default component types
-        debug: Enable verbose output
-    
-    Returns:
-        Dictionary mapping component type keys to lists of component names
-        Example: {'R': ['R1', 'R2'], 'C': ['C1', 'C3'], ...}
-    """
+    """Classify components by type based on designator prefixes (R, C, U, VR, etc.)."""
     
     component_types = DEFAULT_COMPONENT_TYPES.copy()
     if custom_groups:
@@ -245,7 +166,6 @@ def classify_components(component_data: Dict, custom_groups: Optional[Dict] = No
     for component_name in component_data.keys():
         classified = False
         
-        # Try to match component prefix (longest first to match VR before V, etc.)
         for prefix in sorted(component_types.keys(), key=len, reverse=True):
             if component_name.upper().startswith(prefix.upper()):
                 group_key = prefix
@@ -257,21 +177,17 @@ def classify_components(component_data: Dict, custom_groups: Optional[Dict] = No
         
         if not classified:
             unclassified.append(component_name)
-    
-    # Handle unclassified components
     if unclassified:
         print(f"Unclassified components ({len(unclassified)}): "
               f"{unclassified[:10]}{'...' if len(unclassified) > 10 else ''}")
         
-        # Analyze patterns and group or put in miscellaneous
         for component in unclassified:
             matched_pattern = False
             
-            # Common pattern matching for misc components
             patterns = [
-                (r'^(FB|FERR)', 'FB'),   # Ferrite beads
-                (r'^(X|XTAL|Y)', 'CR'),  # Crystals
-                (r'^(P|PAD)', 'TP'),     # Pads/test points
+                (r'^(FB|FERR)', 'FB'),
+                (r'^(X|XTAL|Y)', 'CR'),
+                (r'^(P|PAD)', 'TP'),
             ]
             
             for pattern, group in patterns:
@@ -282,13 +198,11 @@ def classify_components(component_data: Dict, custom_groups: Optional[Dict] = No
                     matched_pattern = True
                     break
             
-            # Put remaining in miscellaneous
             if not matched_pattern:
                 if 'MISC' not in grouped_components:
                     grouped_components['MISC'] = []
                 grouped_components['MISC'].append(component)
     
-    # Print classification summary
     print("\nComponent Classification:")
     for group, components in grouped_components.items():
         group_name = component_types.get(group, {}).get('name', group)

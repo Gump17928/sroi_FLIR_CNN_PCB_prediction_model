@@ -1,0 +1,1147 @@
+================================================================================
+CROSS-PCB THERMAL PREDICTION MODEL: PROBLEM ANALYSIS & SOLUTIONS
+================================================================================
+Date: January 27, 2026
+Model: U-Net CNN for FLIR → Embedded Temperature Prediction
+Dataset: HBridge & LoadShedding PCBs
+
+================================================================================
+1. ORIGINAL PROBLEM
+================================================================================
+
+SYMPTOM:
+--------
+Model trained on HBridge PCB with component-level holdout validation shows:
+- R² = -3.46 (worse than baseline)
+- RMSE = 9.89°C
+- Predictions highly correlated with FLIR input (r=0.993)
+- Predictions poorly correlated with ground truth (r=0.146)
+
+DIAGNOSTIC EVIDENCE:
+--------------------
+Comprehensive analysis revealed:
+1. Predictions vs FLIR input:     r = 0.993 → Model COPYING input
+2. Predictions vs Ground truth:   r = 0.146 → Model NOT learning target
+3. FLIR vs Ground truth:          r = 0.131 → There IS a transformation to learn
+
+CONCLUSION: Model is outputting FLIR surface temps, not embedded temps
+
+ROOT CAUSE:
+-----------
+The model architecture and training setup creates a fundamental learning problem:
+
+A) Sparse Supervision (Masked Loss)
+   - Only 22 component ROIs supervised (~1,800 pixels out of 307,200)
+   - 99.4% of pixels receive no gradient signal
+   - Model learns: "output temps at these specific pixel locations"
+   - Model does NOT learn: "transform local FLIR pattern → embedded temp"
+
+B) Component-Level Holdout (Spatial Validation)
+   - Training: 18 components (locations: L1, L2, ..., L18)
+   - Validation: 4 components (locations: V1, V2, V3, V4)
+   - Validation locations NEVER receive gradients during training
+   - Model defaults to FLIR-like output at unseen locations
+
+C) Location-Specific Learning
+   - Model learns: "At pixel (x,y), predict temperature T"
+   - Model learns global image → specific pixel mappings
+   - Model does NOT learn: "Local FLIR pattern → embedded offset"
+   - No spatial translation invariance
+
+ANALOGY: 
+--------
+It's like teaching someone to predict indoor temperature from outdoor temperature,
+but only training them on houses at specific GPS coordinates. When you ask them
+to predict for a house at a new location, they just repeat the outdoor temp
+because they never learned the general indoor/outdoor relationship.
+
+
+================================================================================
+2. USER'S ACTUAL DEPLOYMENT GOAL
+================================================================================
+
+SCENARIO:
+---------
+Run air test (FLIR) on NEW PCB design (PCB C):
+- Have ROI locations for all components on PCB C
+- Want to predict embedded temperatures for ALL components
+- Do NOT have embedded test data for validation
+- Model must generalize from training on PCB A & B
+
+REQUIREMENTS:
+-------------
+Model must learn PHYSICS-BASED SPATIAL RELATIONSHIPS:
+- How FLIR surface pattern relates to embedded component temperature
+- Generalizable across different:
+  • PCB layouts
+  • Component types
+  • Component locations
+  • Board geometries
+  • Thermal coupling patterns
+
+CURRENT BLOCKER:
+----------------
+Masked loss + component holdout cannot achieve this because:
+1. Learns location-specific mappings, not general physics
+2. No supervision at new PCB locations
+3. Will default to copying FLIR at all new component positions
+
+
+================================================================================
+3. AVAILABLE DATA
+================================================================================
+
+DATASET INVENTORY:
+------------------
+PCB 1: HBridge
+  - FLIR thermal images: 301 frames (480×640 pixels)
+  - Embedded thermistor data: 22 components, 8,719 timestamps
+  - Temporal range: 0 - 130,770 seconds
+  - Test type: Air test with embedded monitoring
+
+PCB 2: LoadShedding
+  - FLIR thermal images: Available
+  - Embedded thermistor data: ~20 components
+  - Similar temporal coverage
+  - Same test setup (air + embedded)
+
+SAMPLING STRATEGY (Current HBridge):
+-------------------------------------
+Hybrid dense/sparse temporal sampling:
+  - Dense region (0-4500s): Sample every 45s → ~100 samples
+  - Sparse region (4500s+): Sample every 1500s → ~84 samples
+  - Total: ~185 validation timestamps
+  - Training: 80% of sampled timestamps
+  - Validation: 20% of sampled timestamps
+
+
+================================================================================
+4. VALIDATION STRATEGY OPTIONS
+================================================================================
+
+OPTION 1: Cross-PCB Validation (Train One PCB, Validate Other)
+---------------------------------------------------------------
+Configuration:
+  Train:    HBridge (all 22 components, all sampled timestamps)
+  Validate: LoadShedding (all ~20 components, all sampled timestamps)
+
+What This Tests:
+  "Can model predict embedded temps on completely different PCB design?"
+  → Tests TRUE spatial generalization across PCBs
+
+Pros:
+  + Directly tests deployment scenario
+  + Most realistic validation
+  + Clear success/failure metric
+  + Uses all available data efficiently
+
+Cons:
+  - Limited training data (1 PCB only)
+  - No way to improve if it fails without architecture changes
+  - Different PCBs may have different physics
+
+
+OPTION 2: Combined Training with Component Holdout
+---------------------------------------------------
+Configuration:
+  Train:    HBridge (18 comp) + LoadShedding (16 comp) = 34 components
+  Validate: HBridge (4 comp) + LoadShedding (4 comp) = 8 components
+
+What This Tests:
+  "Can model generalize to unseen component locations with more training data?"
+
+Pros:
+  + More training data (2 PCBs)
+  + Tests generalization across datasets
+  + Can compare performance across both PCBs
+
+Cons:
+  - Still suffers from location-specific learning
+  - Validation components at unseen locations
+  - Doesn't solve fundamental masked loss problem
+
+
+OPTION 3: Leave-One-PCB-Out Cross-Validation
+---------------------------------------------
+Configuration:
+  Fold 1: Train LoadShedding → Validate HBridge
+  Fold 2: Train HBridge → Validate LoadShedding
+
+What This Tests:
+  "Rigorous evaluation of cross-PCB generalization"
+  → Average performance across both directions
+
+Pros:
+  + Most rigorous evaluation
+  + Tests both train/val directions
+  + Reduces dataset-specific bias
+
+Cons:
+  - 2x training time
+  - Still limited to 1 PCB training per fold
+  - Doesn't solve underlying learning problem
+
+
+OPTION 4: Temporal Validation (All Components, Time Split)
+-----------------------------------------------------------
+Configuration:
+  Train:    All 22 components, timestamps 0-80% (~148 timestamps)
+  Validate: All 22 components, timestamps 80-100% (~37 timestamps)
+
+What This Tests:
+  "Can model predict at NEW thermal conditions (future time)?"
+  → Tests temporal generalization, not spatial
+
+Pros:
+  + All component locations get training gradients
+  + Can verify model CAN learn FLIR→embedded transformation
+  + Tests extrapolation to unseen thermal states
+
+Cons:
+  - Does NOT test cross-PCB generalization
+  - Does NOT test spatial generalization
+  - Not aligned with deployment goal
+  - Only useful as diagnostic to verify learning capability
+
+
+================================================================================
+5. IMPLEMENTING OPTION 1: CROSS-PCB VALIDATION
+================================================================================
+
+STEP 1: Build LoadShedding Dataset
+-----------------------------------
+Required Action:
+  Create LoadShedding HDF5 dataset matching HBridge format
+
+Command:
+  cd /home/forrest/home/modeling/thermal_post_processing/ml_model/cnn_thermal_modeling
+  python build_dataset.py --config LoadShedding_multi_test_config.json
+
+Expected Output:
+  datasets/LoadShedding_cnn_dataset.h5
+
+Dataset Structure:
+  - flir_frames: (n_frames, 480, 640) - FLIR thermal images
+  - sand_temps: (n_timestamps, n_components) - Embedded thermistor data
+  - roi_masks: (n_components, 480, 640) - Component ROI binary masks
+  - timestamps: (n_timestamps,) - Time values
+  - frame_indices: (n_timestamps,) - Maps timestamps to frames
+  - metadata: Component names, indices, etc.
+
+
+STEP 2: Create Cross-PCB Training Script
+-----------------------------------------
+Modify train_hbridge_model.py or create new script:
+
+Key Changes:
+1. Load HBridge dataset for training
+2. Load LoadShedding dataset for validation
+3. Ensure consistent normalization across both datasets
+4. Use ALL components (no component holdout)
+5. Use same temporal sampling strategy
+
+Pseudocode:
+  # Load training data
+  train_dataset = load_hdf5("HBridge_cnn_dataset.h5")
+  train_components = ALL  # Use all 22 components
+  
+  # Load validation data
+  val_dataset = load_hdf5("LoadShedding_cnn_dataset.h5")
+  val_components = ALL  # Use all ~20 components
+  
+  # Create generators
+  train_gen = HDF5DataGenerator(
+      train_dataset,
+      component_indices=train_components,
+      temporal_sampling="dense_sparse"
+  )
+  
+  val_gen = HDF5DataGenerator(
+      val_dataset,
+      component_indices=val_components,
+      temporal_sampling="dense_sparse"
+  )
+  
+  # Train model
+  model.fit(train_gen, validation_data=val_gen, epochs=50)
+
+
+STEP 3: Run Training
+---------------------
+Execute:
+  python train_cross_pcb.py
+
+Monitor:
+  - Training loss should decrease (learning on HBridge)
+  - Validation loss will likely NOT decrease (can't generalize)
+  - Expect poor validation metrics
+
+
+STEP 4: Evaluate on LoadShedding
+---------------------------------
+Run evaluation:
+  python evaluate_cross_pcb.py
+
+Expected Metrics:
+  - R² on LoadShedding: Likely -5 to -20 (very poor)
+  - Predictions will correlate with LoadShedding FLIR input
+  - Predictions will NOT correlate with LoadShedding embedded temps
+
+Diagnostic:
+  python diagnose_model_predictions.py \
+    --npz results/cross_pcb/predictions_loadshedding.npz \
+    --dataset datasets/LoadShedding_cnn_dataset.h5
+
+
+================================================================================
+6. EXPECTED ISSUES WITH OPTION 1
+================================================================================
+
+ISSUE 1: Location-Specific Learning (CRITICAL)
+-----------------------------------------------
+Problem:
+  Model learns: "At pixel coordinates (x,y), predict temperature T"
+  Not: "Given local FLIR pattern, predict embedded offset"
+
+Why It Happens:
+  - U-Net architecture processes full image with spatial awareness
+  - Masked loss provides supervision at specific pixel locations
+  - Model implicitly learns to use absolute position as feature
+  - Convolutional layers can encode position via receptive field
+
+Evidence:
+  - Model works on training locations (HBridge ROIs)
+  - Model fails on validation locations (LoadShedding ROIs)
+  - Even though FLIR patterns may be similar
+
+Impact on Cross-PCB:
+  - LoadShedding components at different (x,y) positions
+  - Model never trained at those positions
+  - Defaults to FLIR-like output
+
+
+ISSUE 2: Different PCB Characteristics
+---------------------------------------
+Problem:
+  HBridge ≠ LoadShedding in many ways
+
+Differences:
+  1. Component types (different ICs, passives)
+  2. Power dissipation patterns
+  3. Board geometry and layout
+  4. Thermal coupling between components
+  5. Heat sinking effectiveness
+  6. Component densities
+  7. Trace routing (affects thermal paths)
+
+Impact:
+  Even if model learned generalizable features, physics differs
+  
+Example:
+  - HBridge: High-power MOSFET, embedded temp = FLIR + 15°C
+  - LoadShedding: Low-power IC, embedded temp = FLIR + 2°C
+  - Model trained on HBridge offset won't apply to LoadShedding
+
+
+ISSUE 3: Insufficient Training Diversity
+-----------------------------------------
+Problem:
+  Training on 1 PCB design = limited pattern diversity
+
+Statistics:
+  - 1 PCB × 185 timestamps ≈ 185 unique thermal conditions
+  - 22 components × 185 timestamps = 4,070 training samples
+  - But all from SAME spatial configuration
+
+Comparison to Typical CNN Training:
+  - ImageNet: 1.2M images, diverse scenes
+  - Our case: 185 thermal states, 1 PCB layout
+  - Insufficient to learn generalizable physics
+
+Impact:
+  Model overfits to HBridge-specific patterns
+  Cannot extrapolate to LoadShedding
+
+
+ISSUE 4: Sparse Supervision Prevents Local Learning
+----------------------------------------------------
+Problem:
+  Masked loss only penalizes 22 ROIs (~0.6% of pixels)
+
+Consequence:
+  - Model doesn't learn local FLIR pattern → temp relationship
+  - No gradient signal for most of the image
+  - Intermediate layers don't learn useful local features
+  - Model learns global image → specific outputs
+
+What We Need:
+  Model should learn: "In 16×16 patch around component, FLIR pattern → embedded offset"
+
+What We Get:
+  Model learns: "Given full 480×640 image, output temps at these 22 locations"
+
+
+ISSUE 5: No Spatial Translation Invariance
+-------------------------------------------
+Problem:
+  Same component at different locations treated as different
+
+Example:
+  - Component A at HBridge position (100, 200)
+  - Same component type at LoadShedding position (250, 350)
+  - Model should predict same FLIR→embedded relationship
+  - But model treats these as unrelated
+
+Cause:
+  - U-Net uses position information implicitly
+  - No mechanism to enforce translation invariance
+  - Masked loss doesn't encourage position-independent learning
+
+
+================================================================================
+7. METHODS TO FIX THE FUNDAMENTAL PROBLEMS
+================================================================================
+
+FIX 1: Dense Supervision via Interpolation
+-------------------------------------------
+Concept:
+  Generate dense ground truth across full image, not just ROIs
+
+Method 1A: Physics-Based Interpolation
+  - Use thermal diffusion equation
+  - Interpolate from known ROI temperatures
+  - Account for heat sources, sinks
+  - Creates smooth temperature field
+
+Implementation:
+  1. For each frame, have 22 point measurements
+  2. Solve thermal diffusion: ∇²T = heat_sources
+  3. Boundary conditions: ROI temps, board edges
+  4. Output: Full 480×640 temperature map
+  5. Train with pixel-wise MSE loss (not masked)
+
+Pros:
+  + Every pixel receives gradient signal
+  + Model learns local patterns everywhere
+  + Can generalize to new positions
+
+Cons:
+  - Interpolation may not be accurate
+  - Requires physics model parameters
+  - Computationally intensive
+  - Assumes smooth thermal field (may not be true)
+
+
+Method 1B: Neural Interpolation
+  - Train auxiliary network to interpolate
+  - Input: Sparse ROI temps
+  - Output: Dense temperature field
+  - Use this as training target
+
+Implementation:
+  1. Train interpolation network on HBridge data
+  2. Generate pseudo-labels for all pixels
+  3. Train main model with dense supervision
+  4. Validate on LoadShedding
+
+Pros:
+  + Data-driven interpolation
+  + No physics assumptions needed
+  + Can capture complex patterns
+
+Cons:
+  - Interpolation quality uncertain
+  - Propagates errors from interpolator
+  - Requires additional training
+
+
+FIX 2: Patch-Based Architecture
+--------------------------------
+Concept:
+  Process local patches, not full image
+  Forces model to learn local FLIR → temp relationship
+
+Architecture Change:
+  Current: U-Net processes full 480×640 image
+  New:     Process 64×64 patches around each component
+
+Implementation:
+  1. Extract 64×64 patch centered on each component ROI
+  2. Input: FLIR patch + time scalar
+  3. Output: Single temperature value (component center)
+  4. Train on patches from both PCBs
+
+Training:
+  - HBridge: 22 components × 185 timestamps = 4,070 patches
+  - LoadShedding: 20 components × ~185 timestamps = 3,700 patches
+  - Total: ~7,770 training patches
+  - No position information (translation invariant)
+
+Pros:
+  + Position-independent learning
+  + Can train on patches from both PCBs
+  + Naturally generalizes to new positions
+  + Smaller model (less parameters)
+
+Cons:
+  - Loses global context
+  - Can't model long-range thermal coupling
+  - Component-level prediction only (no full field)
+  - May need larger patches for context
+
+
+FIX 3: Object Detection Style Architecture
+-------------------------------------------
+Concept:
+  Detect components, predict temp for each
+  Like YOLO/Faster-RCNN but for temperature
+
+Architecture:
+  1. Backbone: Extract features from full FLIR image
+  2. RPN: Detect component regions (given ROI masks)
+  3. RoI pooling: Extract features for each component
+  4. Head: Predict temperature from component features
+
+Implementation:
+  Stage 1: Feature Extraction
+    - Input: 480×640 FLIR + time
+    - Output: Feature map
+  
+  Stage 2: RoI Feature Extraction
+    - For each component ROI:
+      • Pool features from that region
+      • Get fixed-size feature vector
+  
+  Stage 3: Temperature Prediction
+    - Input: Component features + time
+    - Output: Temperature (single value)
+
+Training:
+  - Loss: MSE between predicted and actual temps
+  - All components from both PCBs
+  - Model learns component-level features
+
+Pros:
+  + Uses ROI information explicitly
+  + Position-independent component features
+  + Can train on multiple PCBs naturally
+  + Scales to new component locations
+
+Cons:
+  - More complex architecture
+  - Requires ROI masks at inference (have this)
+  - No full-field prediction
+  - May need more training data
+
+
+FIX 4: Attention-Based U-Net
+-----------------------------
+Concept:
+  Add attention mechanism to focus on relevant features
+  Reduce reliance on spatial position
+
+Architecture Changes:
+  1. Add self-attention layers in U-Net bottleneck
+  2. Learn where to focus for each component
+  3. Query: Component location
+  4. Keys/Values: FLIR features across image
+
+Implementation:
+  Modified U-Net:
+    Encoder → Extract features
+    Attention → Focus on relevant regions
+    Decoder → Generate prediction
+    Masking → Only penalize at ROIs
+
+Training:
+  - Component-aware attention
+  - Learns: "For this component type, look at surrounding pattern"
+  - Less position-dependent
+
+Pros:
+  + Keeps U-Net structure
+  + Adds position-independent learning
+  + Can model long-range dependencies
+  + Interpretable (can visualize attention)
+
+Cons:
+  - More parameters
+  - Slower training
+  - Still needs masked loss (partial fix only)
+  - May not fully solve position problem
+
+
+FIX 5: Multi-PCB Training with Data Augmentation
+-------------------------------------------------
+Concept:
+  Train on BOTH PCBs with augmentation
+  Force model to learn invariant features
+
+Dataset Augmentation:
+  1. Spatial: Rotate, flip, translate FLIR images and ROI masks together
+  2. Thermal: Add noise, scale intensities
+  3. Component: Randomly drop components during training
+  4. Mix: Combine patches from different PCBs
+
+Implementation:
+  # Training generator
+  def augment_sample(flir, rois, temps):
+      # Random rotation
+      angle = random.choice([0, 90, 180, 270])
+      flir = rotate(flir, angle)
+      rois = rotate(rois, angle)
+      
+      # Random flip
+      if random.random() < 0.5:
+          flir = flip(flir, axis=1)
+          rois = flip(rois, axis=1)
+      
+      # Random crop and resize
+      flir, rois = random_crop(flir, rois, size=(384, 512))
+      flir = resize(flir, (480, 640))
+      rois = resize(rois, (480, 640))
+      
+      # Thermal augmentation
+      flir += np.random.normal(0, 0.5, flir.shape)
+      
+      return flir, rois, temps
+
+Training:
+  - Train on HBridge + LoadShedding simultaneously
+  - Apply augmentation to both
+  - Forces position invariance
+
+Pros:
+  + Uses all available data
+  + Augmentation increases diversity
+  + Can help reduce position dependence
+  + No architecture changes needed
+
+Cons:
+  - Augmentation may not be physically valid
+  - Rotations change thermal patterns
+  - Still limited by sparse supervision
+  - Partial solution only
+
+
+FIX 6: Physics-Informed Neural Network (PINN)
+----------------------------------------------
+Concept:
+  Incorporate thermal physics into loss function
+  Ensure predictions obey heat equation
+
+Physics Constraints:
+  1. Heat equation: ∂T/∂t = α∇²T + Q
+  2. Boundary conditions: Board edges, components
+  3. Conservation of energy
+
+Loss Function:
+  Total Loss = Data Loss + Physics Loss
+  
+  Data Loss = MSE at ROI locations
+  
+  Physics Loss = ||∂T/∂t - α∇²T - Q||²
+    + Boundary condition violations
+    + Energy conservation violations
+
+Implementation:
+  1. Predict full temperature field
+  2. Compute spatial/temporal derivatives
+  3. Check physics equation residuals
+  4. Penalize violations
+
+Pros:
+  + Physically consistent predictions
+  + Can extrapolate better
+  + Dense supervision from physics
+  + Generalizes across scenarios
+
+Cons:
+  - Requires physics parameters (α, Q, etc.)
+  - Much more complex
+  - Slower training
+  - May not have all physics info
+
+
+FIX 7: Component-Type Embeddings
+---------------------------------
+Concept:
+  Learn embeddings for component types
+  Share learning across similar components
+
+Architecture:
+  1. Component metadata: Type, power rating, package
+  2. Embedding: Map component type → feature vector
+  3. Combine: FLIR features + component embedding → temp
+
+Implementation:
+  # Component types
+  component_types = {
+      'MOSFET': 0,
+      'IC': 1,
+      'Resistor': 2,
+      'Capacitor': 3,
+      ...
+  }
+  
+  # Embedding layer
+  embedding = nn.Embedding(n_types, embedding_dim=64)
+  
+  # Forward pass
+  flir_features = encoder(flir_image)
+  component_emb = embedding(component_type)
+  combined = concat(flir_features, component_emb, time)
+  temp = predictor(combined)
+
+Training:
+  - Components of same type share embedding
+  - Model learns type-specific FLIR→temp relationship
+  - Can generalize to new positions of known types
+
+Pros:
+  + Leverages component type information
+  + Transfers learning across instances
+  + Can handle new positions of known types
+  + Relatively simple addition
+
+Cons:
+  - Requires component type labels
+  - Fails on unknown component types
+  - Still needs position-independent features
+  - Partial solution
+
+
+================================================================================
+8. RECOMMENDED IMPLEMENTATION STRATEGY
+================================================================================
+
+PHASE 1: Baseline & Diagnosis (Week 1)
+---------------------------------------
+Goal: Establish baseline and confirm problems
+
+Step 1.1: Run Current Model Diagnostic (DONE)
+  ✓ Confirmed model copying FLIR input
+  ✓ Documented r=0.993 with input, r=0.146 with target
+  ✓ Saved diagnostic plots and analysis
+
+Step 1.2: Build LoadShedding Dataset
+  Action: python build_dataset.py --config LoadShedding_multi_test_config.json
+  Verify: Check dataset has ~20 components, similar structure to HBridge
+  Output: datasets/LoadShedding_cnn_dataset.h5
+
+Step 1.3: Implement Cross-PCB Validation (Option 1)
+  Create: train_cross_pcb_baseline.py
+  Config: Train HBridge (all comp) → Val LoadShedding (all comp)
+  Run: Training with current U-Net + masked loss
+  
+  Expected Results:
+    - Training R² on HBridge: -1 to -3 (similar to current)
+    - Validation R² on LoadShedding: -10 to -50 (much worse)
+    - Confirms cross-PCB generalization failure
+
+Step 1.4: Diagnostic Analysis on LoadShedding
+  Run: diagnose_model_predictions.py on LoadShedding predictions
+  Document: Correlation analysis, temperature offsets
+  Compare: HBridge (r=0.993) vs LoadShedding (expected r>0.99)
+  
+  Deliverable: Baseline metrics document
+
+
+PHASE 2: Temporal Validation Sanity Check (Week 1-2)
+-----------------------------------------------------
+Goal: Verify model CAN learn when properly supervised
+
+Step 2.1: Implement Temporal Split on HBridge
+  Config: All 22 components, 80/20 time split
+  Train: Timestamps 0-80% (all components supervised)
+  Validate: Timestamps 80-100% (same components, new conditions)
+
+Step 2.2: Train and Evaluate
+  Run: Training with temporal validation
+  
+  Expected Results:
+    - Training R²: Should improve (0.3 - 0.7)
+    - Validation R²: Should be positive (0.2 - 0.5)
+    - Predictions should correlate with ground truth
+  
+  Interpretation:
+    - If good: Model CAN learn FLIR→embedded at supervised locations
+    - If bad: Data quality or architecture issues
+
+Step 2.3: Analysis
+  Run: diagnose_model_predictions.py
+  Check: r(pred, actual) should be >0.5
+  Confirm: Model learning transformation, not copying input
+  
+  Decision Point:
+    - If temporal validation works → proceed to Phase 3
+    - If temporal validation fails → revisit data quality/architecture
+
+
+PHASE 3: Patch-Based Architecture (Week 2-3)
+---------------------------------------------
+Goal: Enable position-independent learning
+
+Step 3.1: Design Patch-Based Model
+  Architecture:
+    Input: 64×64 FLIR patch + time scalar
+    Encoder: Conv layers to extract features
+    Bottleneck: Combine spatial features + time
+    Decoder: Predict single temperature
+  
+  Code Structure:
+    class PatchBasedTempPredictor(nn.Module):
+        def __init__(self):
+            self.encoder = Conv2D stack
+            self.time_mlp = Dense layers
+            self.predictor = Dense → 1 output
+        
+        def forward(self, patch, time):
+            spatial_features = self.encoder(patch)
+            temporal_features = self.time_mlp(time)
+            combined = concat([spatial_features, temporal_features])
+            temp = self.predictor(combined)
+            return temp
+
+Step 3.2: Create Patch Dataset
+  Extract patches around each component:
+    - HBridge: 22 components × 185 timestamps = 4,070 patches
+    - LoadShedding: 20 components × ~185 timestamps = 3,700 patches
+  
+  Augmentation:
+    - Random crop within ROI (±10 pixels)
+    - Random rotation (0°, 90°, 180°, 270°)
+    - Gaussian noise
+    - Brightness/contrast adjustment
+
+Step 3.3: Train Patch Model
+  Config: Combined HBridge + LoadShedding training
+  Split: 80% train, 20% val (random component instances)
+  Training: Standard SGD with MSE loss
+  
+  Monitor:
+    - Training loss should decrease
+    - Validation loss should track training
+    - R² should be positive
+
+Step 3.4: Cross-PCB Evaluation
+  Test 1: Train HBridge → Test LoadShedding
+  Test 2: Train LoadShedding → Test HBridge
+  Test 3: Train Both → Test on held-out components
+  
+  Metrics:
+    - R² per PCB
+    - R² per component type
+    - Correlation analysis
+  
+  Expected Improvement:
+    - Should see positive R² on cross-PCB validation
+    - May still have errors due to PCB differences
+
+Step 3.5: Analysis and Iteration
+  Diagnose remaining errors:
+    - Which components fail?
+    - Which thermal conditions fail?
+    - Does model learn component-type patterns?
+  
+  Tuning:
+    - Adjust patch size (32×32, 64×64, 128×128)
+    - Try different architectures
+    - Add component type embeddings
+
+
+PHASE 4: Multi-PCB Training with Augmentation (Week 3-4)
+---------------------------------------------------------
+Goal: Maximize training data and diversity
+
+Step 4.1: Combined Dataset
+  Merge HBridge + LoadShedding:
+    - Total components: ~42
+    - Total timestamps: ~370 per component
+    - Total patches: ~15,000 training samples
+
+Step 4.2: Advanced Augmentation
+  Implement:
+    - Spatial: Rotation, flip, translation, crop
+    - Thermal: Noise, intensity scaling
+    - Temporal: Time warping (interpolation)
+    - Mixup: Blend patches from different PCBs
+
+Step 4.3: Train Large Model
+  Architecture: Larger patch model or return to U-Net with fixes
+  Training: Extended epochs, learning rate scheduling
+  Validation: Leave-one-PCB-out cross-validation
+
+Step 4.4: Performance Evaluation
+  Metrics:
+    - Cross-PCB R²
+    - Per-component accuracy
+    - Temperature distribution matching
+  
+  Comparison to Baseline:
+    - Should show significant improvement
+    - Target: R² > 0.5 on cross-PCB validation
+
+
+PHASE 5: Advanced Fixes (Week 4-5, If Needed)
+----------------------------------------------
+If Phase 3-4 insufficient, implement:
+
+Option A: Object Detection Architecture
+  - Implement RoI-based feature extraction
+  - Train on both PCBs
+  - Test cross-PCB generalization
+
+Option B: Physics-Informed Approach
+  - Add thermal physics constraints
+  - Dense supervision via interpolation
+  - Validate physics consistency
+
+Option C: Ensemble Methods
+  - Train multiple models
+  - Component-type-specific models
+  - PCB-specific models with transfer learning
+
+
+PHASE 6: Deployment Preparation (Week 5-6)
+-------------------------------------------
+Goal: Package for production use
+
+Step 6.1: Model Optimization
+  - Quantization for faster inference
+  - TensorRT/ONNX conversion
+  - Batch processing optimization
+
+Step 6.2: Validation Pipeline
+  - Automated cross-validation
+  - Uncertainty quantification
+  - Error bounds estimation
+
+Step 6.3: Documentation
+  - Model card: Architecture, training data, performance
+  - Usage guide: Input format, preprocessing, inference
+  - Limitations: Known failure modes, applicability range
+
+Step 6.4: Testing on New PCB
+  - Run FLIR test on new PCB design
+  - Generate predictions
+  - Validate against embedded measurements (if available)
+  - Iterate as needed
+
+
+================================================================================
+9. SUCCESS CRITERIA
+================================================================================
+
+MINIMUM VIABLE:
+---------------
+Cross-PCB validation R² > 0.0
+  → Model predictions better than mean baseline
+  → Some learning of FLIR→embedded relationship
+
+TARGET:
+-------
+Cross-PCB validation R² > 0.5
+  → Model explains >50% of variance
+  → Useful for practical temperature estimation
+  → Predictions track thermal behavior
+
+IDEAL:
+------
+Cross-PCB validation R² > 0.7
+  → Strong predictive performance
+  → Can be used for design decisions
+  → Generalizes well across PCB designs
+
+RMSE Targets:
+-------------
+Minimum: <8°C (better than current 9.89°C)
+Target: <5°C (useful for thermal management)
+Ideal: <3°C (accurate thermal prediction)
+
+
+================================================================================
+10. RISK ASSESSMENT
+================================================================================
+
+HIGH RISK:
+----------
+1. Fundamental Architectural Limitation
+   Risk: U-Net with masked loss cannot learn position-independent features
+   Mitigation: Switch to patch-based or RoI-based architecture early
+   Impact: May require complete redesign
+
+2. Insufficient Training Data
+   Risk: 2 PCBs insufficient to learn generalizable physics
+   Mitigation: Extensive augmentation, collect more PCB data
+   Impact: May hit performance ceiling
+
+3. PCB Physics Too Different
+   Risk: HBridge and LoadShedding have incompatible thermal behavior
+   Mitigation: Component-type-specific modeling
+   Impact: May need per-PCB-family models
+
+MEDIUM RISK:
+------------
+1. Overfitting to Training PCBs
+   Risk: Model memorizes training data, doesn't generalize
+   Mitigation: Strong regularization, dropout, augmentation
+   Impact: Lower cross-PCB performance
+
+2. ROI Quality Issues
+   Risk: Inaccurate ROI masks lead to wrong supervision
+   Mitigation: Verify ROI alignments, manual correction
+   Impact: Reduced model accuracy
+
+3. Temporal Sampling Mismatch
+   Risk: Training and deployment thermal conditions differ
+   Mitigation: Diverse temporal sampling, steady-state focus
+   Impact: Model fails at certain thermal conditions
+
+LOW RISK:
+---------
+1. Normalization Issues
+   Risk: Different temperature ranges across PCBs
+   Mitigation: Careful normalization, per-PCB statistics
+   Impact: Minor accuracy reduction
+
+2. Computational Resources
+   Risk: Training takes too long
+   Mitigation: Smaller models, efficient architecture
+   Impact: Slower iteration
+
+
+================================================================================
+11. DECISION POINTS
+================================================================================
+
+CHECKPOINT 1: After Cross-PCB Baseline (Phase 1)
+-------------------------------------------------
+Question: How bad is cross-PCB generalization?
+
+If R² > -5:
+  → Proceed with current architecture, try augmentation
+  
+If -5 > R² > -20:
+  → Moderate failure, try patch-based approach
+  
+If R² < -20:
+  → Severe failure, major architecture change needed
+
+
+CHECKPOINT 2: After Temporal Validation (Phase 2)
+--------------------------------------------------
+Question: Can model learn FLIR→embedded when supervised?
+
+If R² > 0.5:
+  → Yes, model capable of learning, problem is generalization
+  → Proceed to Phase 3 (patch-based)
+  
+If 0.0 < R² < 0.5:
+  → Partial learning, may need architecture improvements
+  → Try both Phase 3 and data quality fixes
+  
+If R² < 0.0:
+  → Fundamental issue: data quality, architecture, or both
+  → Deep dive into data analysis before proceeding
+
+
+CHECKPOINT 3: After Patch-Based Model (Phase 3)
+------------------------------------------------
+Question: Does position-independent learning help?
+
+If Cross-PCB R² > 0.5:
+  → Success! Proceed to optimization
+  
+If 0.0 < R² < 0.5:
+  → Improvement but not enough
+  → Try Phase 4 (multi-PCB training)
+  
+If R² < 0.0:
+  → Patch approach insufficient
+  → Need Phase 5 (advanced methods)
+
+
+================================================================================
+12. OPEN QUESTIONS
+================================================================================
+
+1. Component Type Information:
+   - Do we have component type labels?
+   - Can we leverage manufacturer datasheets?
+   - Should we cluster components by thermal behavior?
+
+2. Additional Data:
+   - Are there other PCB designs available?
+   - Can we run additional tests to increase diversity?
+   - Is there steady-state vs transient preference?
+
+3. Deployment Constraints:
+   - What accuracy is acceptable for design decisions?
+   - Are there specific components of high concern?
+   - How often will model be retrained?
+
+4. Physics Knowledge:
+   - Do we have board thermal models?
+   - Can we estimate component power dissipation?
+   - Are there heat sinks or cooling mechanisms to model?
+
+
+================================================================================
+13. NEXT IMMEDIATE ACTIONS
+================================================================================
+
+ACTION 1: Build LoadShedding Dataset
+-------------------------------------
+Priority: CRITICAL
+Command: python build_dataset.py --config LoadShedding_multi_test_config.json
+Verify: ls -lh datasets/LoadShedding_cnn_dataset.h5
+Time: ~30 minutes
+
+
+ACTION 2: Create Cross-PCB Training Script
+-------------------------------------------
+Priority: HIGH
+File: train_cross_pcb_baseline.py
+Content: Modify train_hbridge_model.py for cross-PCB
+Time: 2-3 hours
+
+
+ACTION 3: Run Baseline Cross-PCB Experiment
+--------------------------------------------
+Priority: HIGH
+Command: python train_cross_pcb_baseline.py
+Monitor: Training/validation loss, R² metrics
+Time: 4-6 hours (training) + 1 hour (evaluation)
+
+
+ACTION 4: Analyze Baseline Results
+-----------------------------------
+Priority: HIGH
+Tools: diagnose_model_predictions.py, manual analysis
+Output: Baseline performance document
+Decision: Choose Phase 2, 3, or 5 based on results
+Time: 2-3 hours
+
+
+ACTION 5: Team Discussion
+--------------------------
+Priority: MEDIUM
+Agenda:
+  - Review this document
+  - Discuss baseline results
+  - Decide on path forward (Phase 2, 3, or 5)
+  - Assign resources and timeline
+Time: 1-2 hours
+
+
+================================================================================
+END OF DOCUMENT
+================================================================================
+
+For questions or clarifications, refer to:
+- Diagnostic results: results/latest/diagnostic_analysis.csv
+- Code implementation: train_hbridge_model.py, phase8c_spatial_cnn.py
+- This document: CROSS_PCB_VALIDATION_ANALYSIS.txt
+
+Last Updated: January 27, 2026

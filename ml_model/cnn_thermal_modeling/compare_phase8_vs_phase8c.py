@@ -62,31 +62,33 @@ def load_phase8_metrics():
 
 def load_phase8c_metrics(results_dir):
     """
-    Load Phase 8c CNN metrics from most recent predictions.
+    Load Phase 8c CNN metrics from metrics file.
     
     Args:
-        results_dir: Path to results directory
+        results_dir: Path to results directory (analysis folder)
     
     Returns:
         dict with r2, rmse, mae
     """
     results_path = Path(results_dir)
     
-    # Find most recent metrics file
-    metrics_files = list(results_path.glob("metrics_*.txt"))
+    # Look for metrics.txt file
+    metrics_file = results_path / "metrics.txt"
     
-    if not metrics_files:
-        raise FileNotFoundError(f"No Phase 8c metrics found in {results_dir}")
-    
-    latest_metrics = max(metrics_files, key=lambda p: p.stat().st_mtime)
+    # If not found, look for timestamped version (backwards compatibility)
+    if not metrics_file.exists():
+        metrics_files = list(results_path.glob("metrics_*.txt"))
+        if not metrics_files:
+            raise FileNotFoundError(f"No Phase 8c metrics found in {results_dir}")
+        metrics_file = max(metrics_files, key=lambda p: p.stat().st_mtime)
     
     print("="*80)
     print("PHASE 8C U-NET CNN METRICS")
     print("="*80)
-    print(f"Loading: {latest_metrics.name}")
+    print(f"Loading: {metrics_file.name}")
     
     # Parse metrics file
-    with open(latest_metrics, 'r') as f:
+    with open(metrics_file, 'r') as f:
         content = f.read()
     
     # Extract metrics (simple parsing)
@@ -167,7 +169,7 @@ def create_comparison_plots(phase8, phase8c, output_dir):
     plt.tight_layout()
     
     # Save
-    output_file = output_path / f"phase8_vs_phase8c_comparison_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
+    output_file = output_path / "phase8_vs_phase8c_comparison.png"
     plt.savefig(output_file, dpi=150, bbox_inches='tight')
     print(f"✓ Comparison plot saved: {output_file.name}")
     plt.close()
@@ -237,7 +239,7 @@ def create_approach_comparison(phase8, phase8c, output_dir):
         table[(0, i)].set_text_props(weight='bold')
     
     # Save
-    output_file = output_path / f"approach_comparison_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
+    output_file = output_path / "approach_comparison.png"
     plt.savefig(output_file, dpi=150, bbox_inches='tight')
     print(f"✓ Approach comparison saved: {output_file.name}")
     plt.close()
@@ -246,7 +248,7 @@ def create_approach_comparison(phase8, phase8c, output_dir):
 def generate_comparison_report(phase8, phase8c, output_dir):
     """Generate detailed comparison report."""
     output_path = Path(output_dir)
-    report_file = output_path / f"comparison_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
+    report_file = output_path / "comparison_report.txt"
     
     with open(report_file, 'w') as f:
         f.write("="*80 + "\n")

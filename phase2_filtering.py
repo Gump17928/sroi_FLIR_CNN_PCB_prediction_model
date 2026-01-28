@@ -15,6 +15,8 @@ This module provides:
 import numpy as np
 import pandas as pd
 from typing import Dict, Optional
+from pathlib import Path
+import shutil
 
 # Import scipy for advanced filtering (optional)
 try:
@@ -306,3 +308,266 @@ def compare_filter_methods(component_data: Dict, component_name: str,
             comparison_results[method] = filtered
     
     return comparison_results
+
+
+def filter_flir_frames_for_ml(
+    input_folder: Path,
+    output_folder: Path,
+    kernel_size: int = 5,
+    verbose: bool = True
+) -> None:
+    """
+    Filter full FLIR frame sequences for ML training.
+    
+    Applies temporal median filter to each pixel across all frames.
+    This removes camera refocusing artifacts while preserving spatial information
+    needed for U-Net CNN training.
+    
+    Args:
+        input_folder: Path to ResearchIR_Outputs folder (e.g., ResearchIR_Outputs_HBridge_15s)
+        output_folder: Path to filtered outputs (e.g., ResearchIR_Outputs_HBridge_15s_filtered)
+        kernel_size: Median filter window size (default 5, matches component filtering)
+        verbose: Print progress updates
+    
+    Processing:
+        - Loads all frames into memory (~350MB for 300 frames)
+        - Filters each pixel's time series independently
+        - Writes filtered frames to new CSV files
+        - Copies metadata files unchanged
+    
+    Time estimate: ~4 minutes per board (300 frames × 480×640 pixels)
+    Disk space: ~7MB per board
+    
+    Example:
+        filter_flir_frames_for_ml(
+            Path("inputs/ResearchIR_Outputs_HBridge_15s"),
+            Path("inputs/ResearchIR_Outputs_HBridge_15s_filtered"),
+            kernel_size=5
+        )
+    """
+    if not SCIPY_AVAILABLE:
+        print("ERROR: scipy not available. Cannot filter FLIR frames.")
+        return
+    
+    # Convert to Path objects
+    input_folder = Path(input_folder)
+    output_folder = Path(output_folder)
+    
+    # Create output folder
+    output_folder.mkdir(parents=True, exist_ok=True)
+    
+    # Find all CSV files (FLIR frames)
+    csv_files = sorted(input_folder.glob("*.csv"))
+    n_frames = len(csv_files)
+    
+    if n_frames == 0:
+        print(f"ERROR: No CSV files found in {input_folder}")
+        return
+    
+    if verbose:
+        print(f"\n{'='*80}")
+        print(f"FILTERING FULL FLIR FRAMES FOR ML TRAINING")
+        print(f"{'='*80}")
+        print(f"Input:  {input_folder}")
+        print(f"Output: {output_folder}")
+        print(f"Frames: {n_frames}")
+        print(f"Filter: median (kernel_size={kernel_size})")
+        print(f"\nStep 1: Loading frames into memory...")
+    
+    # Load all frames into memory (480×640×300 ≈ 350MB for float32)
+    frames_list = []
+    for i, csv_file in enumerate(csv_files):
+        try:
+            # ResearchIR CSVs have 5-line header, then 480 rows × 640 columns
+            # Skip first 5 lines (metadata header)
+            df = pd.read_csv(csv_file, header=None, skiprows=5)
+            frames_list.append(df.values)
+            
+            if verbose and (i+1) % 50 == 0:
+                print(f"  Loaded {i+1}/{n_frames} frames...")
+        except Exception as e:
+            print(f"ERROR loading {csv_file.name}: {e}")
+            return
+    
+    # Convert to numpy array: shape (n_frames, height, width)
+    frames = np.array(frames_list, dtype=np.float32)
+    height, width = frames.shape[1], frames.shape[2]
+    
+    if verbose:
+        print(f"  ✓ Loaded {n_frames} frames")
+        print(f"  Frame dimensions: {height} × {width}")
+        print(f"  Total pixels: {height * width:,}")
+        print(f"  Memory usage: ~{frames.nbytes / 1e6:.1f} MB")
+        print(f"\nStep 2: Filtering pixels (this may take a few minutes)...")
+    
+    # Filter each pixel's time series
+    filtered_frames = np.zeros_like(frames)
+    total_pixels = height * width
+    pixels_processed = 0
+    
+    for i in range(height):
+        for j in range(width):
+            # Extract time series for this pixel across all frames
+            pixel_temps = frames[:, i, j]
+            
+            # Apply median filter to remove temporal spikes
+            filtered_temps = median_filter(pixel_temps, size=kernel_size, mode='nearest')
+            
+            # Store filtered values
+            filtered_frames[:, i, j] = filtered_temps
+            pixels_processed += 1
+        
+        # Progress update every 50 rows
+        if verbose and (i+1) % 50 == 0:
+            progress = pixels_processed / total_pixels * 100
+            print(f"  Row {i+1}/{height} ({progress:.1f}% complete)")
+    
+    if verbose:
+        print(f"  ✓ Filtered all {total_pixels:,} pixels")
+        print(f"\nStep 3: Writing filtered frames to CSV...")
+    
+    # Write filtered frames to CSV (same format as input: 5-line header + data)
+    for i, csv_file in enumerate(csv_files):
+        output_csv = output_folder / csv_file.name
+        
+        try:
+            # Read original header lines (first 5 lines)
+            with open(csv_file, 'r') as f:
+                header_lines = [f.readline() for _ in range(5)]
+            
+            # Write header + filtered data
+            with open(output_csv, 'w') as f:
+                # Write header
+                f.writelines(header_lines)
+                
+                # Write filtered frame data (480 rows × 640 columns)
+                df_filtered = pd.DataFrame(filtered_frames[i])
+                df_filtered.to_csv(f, header=False, index=False)
+            
+            if verbose and (i+1) % 50 == 0:
+                print(f"  Wrote {i+1}/{n_frames} files...")
+        except Exception as e:
+            print(f"ERROR writing {output_csv.name}: {e}")
+            return
+    
+    if verbose:
+        print(f"  ✓ Wrote all {n_frames} CSV files")
+        print(f"\nStep 4: Copying metadata files...")
+    
+    # Copy .txt metadata files (small, don't filter)
+    txt_files = list(input_folder.glob("*.txt"))
+    for txt_file in txt_files:
+        try:
+            shutil.copy2(txt_file, output_folder / txt_file.name)
+        except Exception as e:
+            print(f"WARNING: Could not copy {txt_file.name}: {e}")
+    
+    if verbose:
+        print(f"  ✓ Copied {len(txt_files)} metadata file(s)")
+        print(f"\n{'='*80}")
+        print(f"✓ FILTERING COMPLETE!")
+        print(f"{'='*80}")
+        print(f"Filtered frames: {output_folder}")
+        print(f"Total files: {n_frames} CSVs + {len(txt_files)} TXT files")
+        print(f"{'='*80}\n")
+
+
+def export_filtered_temperatures(filtered_data: Dict, output_dir: Path, 
+                                 board_name: str = "HBridge") -> Path:
+    """
+    Export filtered component temperatures to CSV for standalone analysis.
+    
+    Args:
+        filtered_data: Dictionary of component DataFrames (from apply_filtering_to_component_data)
+        output_dir: Directory to save CSV (e.g., outputs/TIMESTAMP/)
+        board_name: Board identifier for filename
+    
+    Returns:
+        Path to exported CSV file
+    """
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    
+    csv_path = output_dir / f"{board_name}_phase2_filtered_temperatures.csv"
+    
+    # Build DataFrame from filtered component data using pd.concat for better performance
+    data_dict = {}
+    
+    # Extract time from first component (all should have same time array)
+    if filtered_data:
+        first_component = next(iter(filtered_data.values()))
+        data_dict['time_s'] = first_component['Time'].values
+    
+    # Add each component's filtered temperatures
+    for component_name, df in filtered_data.items():
+        data_dict[component_name] = df['Temperature'].values
+    
+    # Create DataFrame from dictionary all at once
+    result_df = pd.DataFrame(data_dict)
+    
+    # Export to CSV
+    result_df.to_csv(csv_path, index=False, float_format='%.3f')
+    
+    print(f"  ✓ Exported filtered temperatures: {csv_path.name}")
+    print(f"    Shape: {len(result_df)} samples × {len(result_df.columns)-1} components")
+    
+    return csv_path
+
+
+def export_filter_comparison(component_data: Dict, filter_type: str,
+                             output_dir: Path, board_name: str = "HBridge",
+                             max_components: int = 5) -> Path:
+    """
+    Export filter comparison data for visualization (optional - for debugging).
+    
+    Exports raw vs filtered data for first few components to enable
+    standalone viz_phase2_filtering.py plotting.
+    
+    Args:
+        component_data: Dictionary of component DataFrames (raw data)
+        filter_type: Filter type used ('median', 'savgol', etc.)
+        output_dir: Directory to save CSV
+        board_name: Board identifier
+        max_components: Maximum components to export (default: 5 to limit file size)
+    
+    Returns:
+        Path to exported CSV file
+    """
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    
+    csv_path = output_dir / f"{board_name}_phase2_filter_comparison.csv"
+    
+    rows = []
+    
+    # Get first max_components from the dictionary
+    component_names = list(component_data.keys())[:max_components]
+    
+    for component in component_names:
+        df = component_data[component]
+        times = df['Time'].values
+        raw_temps = df['Temperature'].values
+        
+        # Apply filtering
+        filtered_temps = apply_thermal_filtering(
+            raw_temps, times, filter_type=filter_type
+        )
+        
+        # Build rows for this component
+        for t_idx, time_val in enumerate(times):
+            rows.append({
+                'time_s': time_val,
+                'component': component,
+                'raw': raw_temps[t_idx],
+                'filtered': filtered_temps[t_idx],
+                'filter_type': filter_type
+            })
+    
+    # Export to CSV
+    df = pd.DataFrame(rows)
+    df.to_csv(csv_path, index=False, float_format='%.3f')
+    
+    print(f"  ✓ Exported filter comparison: {csv_path.name}")
+    print(f"    Components: {len(component_names)}, Samples: {len(times)}")
+    
+    return csv_path

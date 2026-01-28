@@ -364,3 +364,77 @@ def estimate_heating_sources(component: str, coupling_metrics: Dict,
         'num_hot_neighbors': metrics['num_hot_neighbors'],
         'top_heat_contributors': top_contributors
     }
+
+
+def export_coupling_matrix(proximity_matrix: Dict, component_data: Dict,
+                           output_dir: str, board_name: str = "HBridge") -> str:
+    """
+    Export spatial coupling matrix to CSV for standalone analysis.
+    
+    Exports pairwise component distances and thermal correlations.
+    
+    Args:
+        proximity_matrix: Dictionary with component distances
+                         Format: {comp1: {comp2: distance_mm, ...}, ...}
+        component_data: Dictionary with component temperature time series
+        output_dir: Directory to save CSV
+        board_name: Board identifier for filename
+    
+    Returns:
+        Path to exported CSV file
+    """
+    output_dir = os.path.abspath(output_dir)
+    os.makedirs(output_dir, exist_ok=True)
+    
+    csv_path = os.path.join(output_dir, f"{board_name}_phase4_spatial_coupling.csv")
+    
+    rows = []
+    
+    # Calculate correlation for each component pair
+    for comp1, neighbors in proximity_matrix.items():
+        if comp1 not in component_data:
+            continue
+        
+        temps1 = component_data[comp1]['Temperature'].values
+        
+        for comp2, distance_mm in neighbors.items():
+            if comp2 not in component_data:
+                continue
+            
+            # Skip self-comparison
+            if comp1 == comp2:
+                continue
+            
+            temps2 = component_data[comp2]['Temperature'].values
+            
+            # Calculate Pearson correlation
+            try:
+                correlation = np.corrcoef(temps1, temps2)[0, 1]
+                
+                # Simple p-value estimate (approximation for quick export)
+                # For proper p-value, would need scipy.stats.pearsonr
+                n = len(temps1)
+                t_stat = correlation * np.sqrt((n - 2) / (1 - correlation**2))
+                # Rough p-value approximation
+                p_value = 2 * (1 - 0.5 * (1 + np.tanh(t_stat / np.sqrt(2))))
+                
+                rows.append({
+                    'component1': comp1,
+                    'component2': comp2,
+                    'distance_mm': distance_mm,
+                    'correlation': correlation,
+                    'p_value': p_value
+                })
+            except:
+                # Skip if correlation calculation fails (e.g., constant temps)
+                continue
+    
+    # Export to CSV
+    df = pd.DataFrame(rows)
+    df = df.sort_values('correlation', ascending=False)  # Sort by strongest correlation first
+    df.to_csv(csv_path, index=False, float_format='%.4f')
+    
+    print(f"  ✓ Exported spatial coupling matrix: {os.path.basename(csv_path)}")
+    print(f"    Component pairs: {len(rows)}")
+    
+    return csv_path

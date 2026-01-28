@@ -117,13 +117,35 @@ def extract_component_predictions(results):
     
     n_frames = len(predictions)
     n_components = len(component_names)
+    n_roi_masks = roi_masks.shape[0]
+    
+    print(f"\nDebug Info:")
+    print(f"  Component names: {n_components}")
+    print(f"  ROI masks: {n_roi_masks}")
+    print(f"  Sand temps columns: {sand_temps.shape[1]}")
+    print(f"  First 5 component names: {component_names[:5]}")
     
     records = []
+    skipped_time = 0
+    skipped_bounds = 0
+    skipped_empty_mask = 0
+    skipped_nan = 0
     
     for frame_idx in range(n_frames):
         for comp_idx, comp_name in enumerate(component_names):
+            # Skip "Time (s)" column if it's in component names
+            if comp_name == "Time (s)":
+                skipped_time += 1
+                continue
+                
             if comp_idx >= sand_temps.shape[1]:
                 # Component in ROI mask but not in thermistor data
+                skipped_bounds += 1
+                continue
+            
+            # Check if this component index exists in ROI masks
+            if comp_idx >= n_roi_masks:
+                skipped_bounds += 1
                 continue
                 
             mask = roi_masks[comp_idx]
@@ -133,6 +155,11 @@ def extract_component_predictions(results):
                 pred_temp = predictions[frame_idx][mask > 0].mean()
                 actual_temp = sand_temps[frame_idx, comp_idx]
                 
+                # Skip if NaN values detected
+                if np.isnan(pred_temp) or np.isnan(actual_temp):
+                    skipped_nan += 1
+                    continue
+                
                 records.append({
                     'timestamp': timestamps[frame_idx],
                     'component': comp_name,
@@ -141,12 +168,19 @@ def extract_component_predictions(results):
                     'error': pred_temp - actual_temp,
                     'abs_error': abs(pred_temp - actual_temp)
                 })
+            else:
+                skipped_empty_mask += 1
     
     df = pd.DataFrame(records)
     
     print(f"✓ Extracted predictions for {len(records)} component-frame pairs")
     print(f"  Components: {n_components}")
     print(f"  Frames: {n_frames}")
+    print(f"\nSkipped:")
+    print(f"  'Time (s)' column: {skipped_time}")
+    print(f"  Out of bounds: {skipped_bounds}")
+    print(f"  Empty ROI masks: {skipped_empty_mask}")
+    print(f"  NaN values: {skipped_nan}")
     
     return df
 
@@ -157,23 +191,40 @@ def calculate_metrics(df):
     print("PERFORMANCE METRICS")
     print("="*80)
     
+    # Check if DataFrame is empty
+    if len(df) == 0:
+        print("\n✗ ERROR: No predictions extracted! Cannot calculate metrics.")
+        print("  This likely means ROI masks don't align with component names.")
+        return None
+    
+    # Filter out any NaN values
+    initial_count = len(df)
+    df_clean = df.dropna(subset=['actual_temp', 'predicted_temp'])
+    
+    if len(df_clean) < len(df):
+        print(f"\n⚠️  Warning: Removed {initial_count - len(df_clean)} rows with NaN values")
+    
+    if len(df_clean) == 0:
+        print("\n✗ ERROR: No valid predictions after removing NaN values!")
+        return None
+    
     # Overall metrics
-    r2 = r2_score(df['actual_temp'], df['predicted_temp'])
-    rmse = np.sqrt(mean_squared_error(df['actual_temp'], df['predicted_temp']))
-    mae = mean_absolute_error(df['actual_temp'], df['predicted_temp'])
+    r2 = r2_score(df_clean['actual_temp'], df_clean['predicted_temp'])
+    rmse = np.sqrt(mean_squared_error(df_clean['actual_temp'], df_clean['predicted_temp']))
+    mae = mean_absolute_error(df_clean['actual_temp'], df_clean['predicted_temp'])
     
     print(f"\nOverall Performance:")
     print(f"  R² Score: {r2:.4f}")
     print(f"  RMSE: {rmse:.2f}°C")
     print(f"  MAE: {mae:.2f}°C")
-    print(f"  Sample count: {len(df)}")
+    print(f"  Sample count: {len(df_clean)}")
     
     # Per-component metrics
     print(f"\nPer-Component Performance:")
     component_metrics = []
     
-    for comp in df['component'].unique():
-        comp_df = df[df['component'] == comp]
+    for comp in df_clean['component'].unique():
+        comp_df = df_clean[df_clean['component'] == comp]
         comp_r2 = r2_score(comp_df['actual_temp'], comp_df['predicted_temp'])
         comp_rmse = np.sqrt(mean_squared_error(comp_df['actual_temp'], comp_df['predicted_temp']))
         comp_mae = mean_absolute_error(comp_df['actual_temp'], comp_df['predicted_temp'])
@@ -247,6 +298,11 @@ def create_scatter_plot(df, output_dir):
     """Create actual vs predicted scatter plot."""
     output_path = Path(output_dir)
     
+    # Check if DataFrame is empty or missing required columns
+    if len(df) == 0 or 'actual_temp' not in df.columns or 'predicted_temp' not in df.columns:
+        print("\n⚠️  Skipping scatter plot - no valid predictions")
+        return
+    
     plt.figure(figsize=(10, 10))
     
     # Scatter plot
@@ -272,24 +328,160 @@ def create_scatter_plot(df, output_dir):
     plt.axis('equal')
     
     # Save
-    output_file = output_path / f"scatter_actual_vs_predicted_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
+    output_file = output_path / "scatter_actual_vs_predicted.png"
     plt.savefig(output_file, dpi=150, bbox_inches='tight')
     print(f"\n✓ Scatter plot saved: {output_file.name}")
+    plt.close()
+
+
+def create_timeseries_plot(results, df, output_dir):
+    """Create temporal evolution plot showing FLIR, predicted, and actual temps over time."""
+    output_path = Path(output_dir)
+    
+    # Check if we have valid data
+    if len(df) == 0 or 'component' not in df.columns:
+        print("\n⚠️  Skipping time series plot - no valid predictions")
+        return
+    
+    print("\n" + "="*80)
+    print("CREATING TIME SERIES PLOT")
+    print("="*80)
+    
+    # Load steady-state values from dataset if available
+    steady_state_values = {}
+    dataset_file = parent_dir / "ml_model" / "cnn_thermal_modeling" / "datasets" / "HBridge_cnn_dataset.h5"
+    try:
+        with h5py.File(dataset_file, 'r') as f:
+            if 'metadata/steady_state' in f:
+                ss_group = f['metadata/steady_state']
+                for key in ss_group.attrs.keys():
+                    if key.startswith('thermistor_'):
+                        comp_name = key.replace('thermistor_', '')
+                        steady_state_values[comp_name] = ss_group.attrs[key]
+                print(f"  ✓ Loaded steady-state values for {len(steady_state_values)} components")
+    except Exception as e:
+        print(f"  ⚠️  Could not load steady-state values: {e}")
+    
+    # Extract data
+    timestamps = results['timestamps']
+    flir_frames = results['flir_frames']
+    predictions = results['predictions']
+    sand_temps = results['sand_temps']
+    roi_masks = results['roi_masks']
+    component_names = df['component'].unique()
+    n_components = len(component_names)
+    
+    # Extract time series for each component
+    component_data = {}
+    for comp_idx, comp_name in enumerate(component_names):
+        if comp_idx >= len(roi_masks):
+            continue
+            
+        mask = roi_masks[comp_idx]
+        
+        # Extract FLIR temps at ROI over time
+        flir_temps = []
+        pred_temps = []
+        actual_temps = []
+        
+        for frame_idx in range(len(flir_frames)):
+            # FLIR surface temperature (mean over ROI)
+            flir_roi = flir_frames[frame_idx][mask > 0]
+            flir_mean = np.mean(flir_roi) if len(flir_roi) > 0 else np.nan
+            flir_temps.append(flir_mean)
+            
+            # CNN predicted temperature (mean over ROI)
+            pred_roi = predictions[frame_idx][mask > 0]
+            pred_mean = np.mean(pred_roi) if len(pred_roi) > 0 else np.nan
+            pred_temps.append(pred_mean)
+            
+            # Thermistor actual temperature
+            actual_temps.append(sand_temps[frame_idx, comp_idx])
+        
+        # Convert to arrays (keep NaN values - they'll just create gaps in lines)
+        flir_temps = np.array(flir_temps)
+        pred_temps = np.array(pred_temps)
+        actual_temps = np.array(actual_temps)
+        
+        component_data[comp_name] = {
+            'flir': flir_temps,
+            'predicted': pred_temps,
+            'actual': actual_temps
+        }
+    
+    # Create grid layout: 2 columns, n_rows = ceil(n_components / 2)
+    n_cols = 2
+    n_rows = int(np.ceil(n_components / n_cols))
+    
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(16, 3 * n_rows))
+    axes = axes.flatten()  # Flatten for easy iteration
+    
+    # Plot each component in its own subplot
+    for idx, (comp_name, data) in enumerate(component_data.items()):
+        ax = axes[idx]
+        
+        # Plot FLIR (dashed line)
+        ax.plot(timestamps, data['flir'], 
+                color='blue', linestyle='--', linewidth=1.5, alpha=0.7)
+        
+        # Plot CNN predicted (solid line)
+        ax.plot(timestamps, data['predicted'], 
+                color='red', linestyle='-', linewidth=2)
+        
+        # Plot thermistor actual (scatter dots)
+        ax.scatter(timestamps, data['actual'], 
+                   color='green', marker='o', s=25, edgecolors='black', linewidth=0.5,
+                   zorder=5)
+        
+        # Plot steady-state line if available
+        if comp_name in steady_state_values:
+            ss_temp = steady_state_values[comp_name]
+            ax.axhline(y=ss_temp, color='purple', linestyle=':', linewidth=1.5, 
+                      alpha=0.7, label='Steady-State (Full Test)' if idx == 0 else '')
+        
+        # Formatting
+        ax.set_title(f'{comp_name}', fontsize=11, fontweight='bold')
+        ax.set_xlabel('Time (s)', fontsize=9)
+        ax.set_ylabel('Temperature (°C)', fontsize=9)
+        ax.grid(True, alpha=0.3, linestyle=':', linewidth=0.5)
+        
+        # Only show legend on first subplot
+        if idx == 0:
+            ax.plot([], [], color='blue', linestyle='--', linewidth=1.5, alpha=0.7, label='FLIR Surface')
+            ax.plot([], [], color='red', linestyle='-', linewidth=2, label='CNN Predicted')
+            ax.scatter([], [], color='green', marker='o', s=25, edgecolors='black', linewidth=0.5, label='Thermistor Actual')
+            if len(steady_state_values) > 0:
+                ax.plot([], [], color='purple', linestyle=':', linewidth=1.5, alpha=0.7, label='Steady-State Baseline')
+            ax.legend(fontsize=8, loc='best', framealpha=0.9)
+    
+    # Hide unused subplots
+    for idx in range(n_components, len(axes)):
+        axes[idx].axis('off')
+    
+    # Overall title
+    fig.suptitle('Temporal Evolution: FLIR Surface vs CNN Predicted vs Thermistor Actual',
+                 fontsize=16, fontweight='bold', y=0.995)
+    
+    plt.tight_layout(rect=[0, 0, 1, 0.99])
+    
+    # Save
+    output_file = output_path / "temporal_evolution.png"
+    plt.savefig(output_file, dpi=150, bbox_inches='tight')
+    print(f"\n✓ Time series plot saved: {output_file.name}")
     plt.close()
 
 
 def export_results(df, metrics, output_dir, model_file):
     """Export predictions and metrics to CSV and text files."""
     output_path = Path(output_dir)
-    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
     
     # Export predictions CSV
-    pred_file = output_path / f"predictions_{timestamp}.csv"
+    pred_file = output_path / "predictions.csv"
     df.to_csv(pred_file, index=False)
     print(f"\n✓ Predictions exported: {pred_file.name}")
     
     # Export metrics
-    metrics_file = output_path / f"metrics_{timestamp}.txt"
+    metrics_file = output_path / "metrics.txt"
     with open(metrics_file, 'w') as f:
         f.write("="*80 + "\n")
         f.write("Phase 8c U-Net CNN - Performance Metrics\n")
@@ -336,6 +528,7 @@ def main():
     # Create visualizations
     create_visualizations(results, results_dir, n_examples=10)
     create_scatter_plot(df, results_dir)
+    create_timeseries_plot(results, df, results_dir)
     
     # Export results
     export_results(df, metrics, results_dir, model_file)

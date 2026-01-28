@@ -81,8 +81,10 @@ class FLIRFrameLoader:
         if not folder.exists():
             raise FileNotFoundError(f"Folder not found: {folder_path}")
         
-        # Find all frame CSV files
-        self.frame_files = sorted(folder.glob(frame_pattern))
+        # Find all frame CSV files (excluding steady-state files)
+        all_files = sorted(folder.glob(frame_pattern))
+        # Skip steady-state files that are generated during data preprocessing
+        self.frame_files = [f for f in all_files if 'Steady_State' not in f.name]
         
         if not self.frame_files:
             raise ValueError(f"No frame files found matching {frame_pattern} in {folder_path}")
@@ -146,14 +148,14 @@ class FLIRFrameLoader:
             NumPy array [height, width] with thermal data
         """
         try:
-            # ResearchIR CSV format has 5 header lines, then blank line, then data
-            # Skip first 6 lines (header + blank)
-            frame_data = np.loadtxt(file_path, delimiter=',', skiprows=6)
+            # ResearchIR CSV format has 5 header lines, then data
+            # Skip first 5 lines (header only, no blank line)
+            frame_data = np.loadtxt(file_path, delimiter=',', skiprows=5)
             return frame_data.astype(np.float32)
             
         except Exception as e:
             # If that fails, try pandas (handles headers better)
-            df = pd.read_csv(file_path, header=None, skiprows=6)
+            df = pd.read_csv(file_path, header=None, skiprows=5)
             return df.values.astype(np.float32)
     
     def _extract_timestamp(self, file_path: Path, frame_index: int) -> float:
@@ -161,9 +163,9 @@ class FLIRFrameLoader:
         Extract timestamp from filename or use frame index.
         
         Common patterns:
-            - "frame_0030.csv" -> 30 seconds (assumes 1s interval)
-            - "thermal_450s.csv" -> 450 seconds
-            - "Rec-000009-328_13_10_18_329_5.csv" -> Use index * 15s
+            - "thermal_450s.csv" -> 450 seconds (explicit timestamp with 's' suffix)
+            - "Rec-000010_123.csv" -> Frame index 123, use index * 15s
+            - Default: frame_index * 15s (ResearchIR standard interval)
         
         Args:
             file_path: Path to frame file
@@ -174,21 +176,24 @@ class FLIRFrameLoader:
         """
         filename = file_path.stem  # Filename without extension
         
-        # Try to extract number from filename
-        # Look for patterns like: _###, ###s, -###
-        patterns = [
-            r'_(\d+)s',      # "_450s" format
-            r'_(\d+)$',      # "_0030" format (end of filename)
-            r'-(\d+)',       # "-450" format
-            r'(\d+)s',       # "450s" format
+        # Try to extract EXPLICIT timestamp (only if 's' suffix indicates seconds)
+        # This prevents misinterpreting frame indices as timestamps
+        explicit_patterns = [
+            r'_(\d+)s$',      # "_450s" format (s suffix = explicit timestamp)
+            r'(\d+)s$',       # "450s" format
         ]
         
-        for pattern in patterns:
+        for pattern in explicit_patterns:
             match = re.search(pattern, filename)
             if match:
                 return float(match.group(1))
         
-        # If no timestamp found, assume 15s intervals (ResearchIR default)
+        # For ResearchIR frame indices (e.g., Rec-000010_100.csv):
+        # The number after underscore is the FRAME INDEX, not timestamp
+        # Use frame_index parameter * 15s instead
+        # This fixes bug where _100, _101 were incorrectly treated as timestamps
+        
+        # Default: 15s intervals (ResearchIR standard)
         # Frame 0 = 0s, Frame 1 = 15s, Frame 2 = 30s, etc.
         return frame_index * 15.0
     

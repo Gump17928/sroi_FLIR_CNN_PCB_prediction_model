@@ -331,3 +331,171 @@ end
         f.write(script_content)
     
     print(f"MATLAB usage script created: {script_path}")
+
+
+def export_component_statistics(component_data: Dict, output_dir: str,
+                                board_name: str = "HBridge") -> str:
+    """
+    Export component-level statistical summary to CSV.
+    
+    Provides thermal statistics for each component for standalone analysis.
+    
+    Args:
+        component_data: Dictionary of component DataFrames
+        output_dir: Directory to save CSV
+        board_name: Board identifier for filename
+    
+    Returns:
+        Path to exported CSV file
+    """
+    output_dir = os.path.abspath(output_dir)
+    os.makedirs(output_dir, exist_ok=True)
+    
+    csv_path = os.path.join(output_dir, f"{board_name}_phase3_component_statistics.csv")
+    
+    rows = []
+    
+    for component_name, df in component_data.items():
+        temps = df['Temperature'].values
+        
+        # Calculate statistics
+        mean_temp = np.mean(temps)
+        max_temp = np.max(temps)
+        min_temp = np.min(temps)
+        std_temp = np.std(temps)
+        n_samples = len(temps)
+        temp_rise = max_temp - min_temp
+        
+        rows.append({
+            'component': component_name,
+            'mean_temp': mean_temp,
+            'max_temp': max_temp,
+            'min_temp': min_temp,
+            'std_temp': std_temp,
+            'temp_rise': temp_rise,
+            'n_samples': n_samples
+        })
+    
+    # Export to CSV
+    df = pd.DataFrame(rows)
+    df = df.sort_values('mean_temp', ascending=False)  # Sort by hottest first
+    df.to_csv(csv_path, index=False, float_format='%.2f')
+    
+    print(f"  ✓ Exported component statistics: {os.path.basename(csv_path)}")
+    print(f"    Components: {len(rows)}")
+    
+    return csv_path
+
+
+def export_component_metadata(roi_pixel_map: Dict, output_dir: str,
+                              board_name: str = "HBridge") -> str:
+    """
+    Export component metadata (ROI info) to CSV.
+    
+    Provides spatial information for each component.
+    
+    Args:
+        roi_pixel_map: Dictionary mapping component names to pixel coordinates
+                      Format: {'U29': [(y1,x1), (y2,x2), ...], ...}
+        output_dir: Directory to save CSV
+        board_name: Board identifier for filename
+    
+    Returns:
+        Path to exported CSV file
+    """
+    output_dir = os.path.abspath(output_dir)
+    os.makedirs(output_dir, exist_ok=True)
+    
+    csv_path = os.path.join(output_dir, f"{board_name}_phase3_component_metadata.csv")
+    
+    rows = []
+    
+    for component_name, pixels in roi_pixel_map.items():
+        if not pixels:
+            continue
+        
+        # Calculate ROI properties
+        roi_pixels = len(pixels)
+        
+        # Calculate centroid
+        y_coords = [p[0] for p in pixels]
+        x_coords = [p[1] for p in pixels]
+        centroid_y = np.mean(y_coords)
+        centroid_x = np.mean(x_coords)
+        
+        # Estimate area (assuming ~0.03125 mm² per pixel for typical FLIR resolution)
+        # This is approximate - actual pixel size depends on camera and distance
+        roi_area_mm2 = roi_pixels * 0.03125
+        
+        rows.append({
+            'component': component_name,
+            'roi_pixels': roi_pixels,
+            'roi_area_mm2': roi_area_mm2,
+            'centroid_y': centroid_y,
+            'centroid_x': centroid_x
+        })
+    
+    # Export to CSV
+    df = pd.DataFrame(rows)
+    df = df.sort_values('roi_pixels', ascending=False)  # Sort by largest ROI first
+    df.to_csv(csv_path, index=False, float_format='%.2f')
+    
+    print(f"  ✓ Exported component metadata: {os.path.basename(csv_path)}")
+    print(f"    Components: {len(rows)}")
+    
+    return csv_path
+
+
+def export_roi_pixel_map_for_cnn(roi_pixel_map: Dict, output_dir: str,
+                                  board_name: str = "HBridge") -> str:
+    """
+    Export ROI pixel map with full pixel lists for CNN training.
+    
+    This is specifically for Phase 8 ML training - saves the actual pixel 
+    coordinates so CNN can build datasets without rerunning Phase 3/4.
+    
+    Args:
+        roi_pixel_map: Dictionary mapping component names to pixel coordinates
+                      Format: {'U29': [(y1,x1), (y2,x2), ...], ...}
+        output_dir: Directory to save CSV
+        board_name: Board identifier for filename
+    
+    Returns:
+        Path to exported CSV file with pixel_list column
+    """
+    output_dir = os.path.abspath(output_dir)
+    os.makedirs(output_dir, exist_ok=True)
+    
+    csv_path = os.path.join(output_dir, f"{board_name}_roi_pixel_map.csv")
+    
+    rows = []
+    
+    for component_name, pixels in roi_pixel_map.items():
+        if not pixels:
+            # Still include components with no ROI (will be empty list)
+            rows.append({
+                'component': component_name,
+                'pixel_count': 0,
+                'pixel_list': '[]'
+            })
+            continue
+        
+        # Convert pixel list to string representation
+        pixel_list_str = str(pixels)
+        
+        rows.append({
+            'component': component_name,
+            'pixel_count': len(pixels),
+            'pixel_list': pixel_list_str
+        })
+    
+    # Export to CSV
+    df = pd.DataFrame(rows)
+    df = df.sort_values('pixel_count', ascending=False)  # Sort by largest ROI first
+    df.to_csv(csv_path, index=False)
+    
+    print(f"  ✓ Exported ROI pixel map for CNN: {os.path.basename(csv_path)}")
+    print(f"    Components: {len(rows)}")
+    print(f"    Total pixels: {df['pixel_count'].sum()}")
+    
+    return csv_path

@@ -1,45 +1,20 @@
 """
-===============================================================================
-RESEARCHIR THERMAL DATA POST-PROCESSOR
-===============================================================================
-Main orchestrator for thermal post-processing workflow.
+ResearchIR Thermal Data Post-Processor
+Main orchestrator for thermal analysis pipeline (Phases 1-8)
 
-Coordinates all 7 phases:
-1. Data Loading - Load and parse ResearchIR exports
-2. Filtering - Remove camera artifacts, analyze transients
-3. Component Analysis - Statistical analysis and export
-4. Spatial Coupling - Thermal interaction analysis
-5. Potting Risk - Failure prediction for embedded systems
-6. Thermal Calibration - Build calibration database from thermistor measurements
-   - Incremental Mode: Append to existing database (--append_calibration)
-   - Multi-Session: Batch process multiple tests (--multi_session_config)
-   - Convergence Analysis: Track quality improvement (--convergence_analysis)
-7. Thermal Prediction - Apply calibration to predict temperatures
+Phases:
+  1-2: Data loading & filtering
+  3-5: Component analysis, spatial coupling, potting risk
+  6-7: Thermal calibration & prediction (requires thermistors)
+  8:   Machine learning (U-Net CNN spatial prediction)
 
-Incremental Calibration Features:
-  - Accumulate calibration data across multiple test sessions
-  - Track which session contributed which measurements
-  - Visualize convergence and quality improvement
-  - Identify component types needing more data
+Key Features:
+  - Incremental calibration across test sessions
+  - Multi-session batch processing
+  - FLIR frame filtering for ML training
+  - Cross-PCB validation support
 
-Usage:
-    # Standard processing
-    python researchir_post_processor.py
-    
-    # Incremental calibration (Week 1)
-    python researchir_post_processor.py --thermal_modeling \
-        --test_session "Week1" --convergence_analysis
-    
-    # Incremental calibration (Week 2 - append)
-    python researchir_post_processor.py --thermal_modeling \
-        --append_calibration --test_session "Week2" --convergence_analysis
-    
-    # Multi-session batch processing
-    python researchir_post_processor.py --thermal_modeling \
-        --multi_session_config config.json --convergence_analysis
-
-Updated: December 2, 2025 - Added incremental calibration support
-===============================================================================
+Usage: python researchir_post_processor.py [--thermal_modeling | --ml_training | --full_pipeline]
 """
 
 import os
@@ -77,325 +52,190 @@ except ImportError:
 
 # Import machine learning phase (8)
 try:
-    import phase8_ml_training as phase8
+    import phase8_ml_training  # U-Net CNN wrapper
     import viz_phase8_ml_results
     ML_AVAILABLE = True
-except ImportError:
+except ImportError as e:
     ML_AVAILABLE = False
-    print("Warning: Machine learning phase (8) not available")
+    print(f"Warning: Machine learning phase (8) not available: {e}")
+
+
+def filter_all_flir_frames():
+    """
+    Filter all ResearchIR FLIR frames using temporal median (kernel=5).
+    Creates *_filtered directories for ML training. ~4 min/board, ~350MB RAM.
+    """
+    inputs_path = Path("inputs")
+    
+    print("\n" + "="*80)
+    print("FLIR FRAME FILTERING FOR ML TRAINING")
+    print("="*80)
+    
+    # Find folders to filter (exclude already filtered)
+    all_folders = list(inputs_path.glob("ResearchIR_Outputs_*"))
+    folders_to_filter = [f for f in all_folders if not f.name.endswith("_filtered")]
+    
+    if not folders_to_filter:
+        print("No ResearchIR folders found. Looking for: inputs/ResearchIR_Outputs_*/")
+        return 0
+    
+    print(f"Found {len(folders_to_filter)} board(s):", ", ".join(f.name for f in folders_to_filter))
+    
+    # Check for existing filtered folders
+    existing_filtered = [(f, f.parent / f"{f.name}_filtered") 
+                        for f in folders_to_filter 
+                        if (f.parent / f"{f.name}_filtered").exists()]
+    
+    if existing_filtered:
+        print(f"\n⚠ Found {len(existing_filtered)} existing filtered folder(s)")
+        response = input("Re-filter? [y/N]: ").strip().lower()
+        if response != 'y':
+            print("Using existing filtered folders")
+            return 0
+        
+        import shutil
+        for _, filt in existing_filtered:
+            shutil.rmtree(filt)
+    
+    # Filter each board
+    print("\nFiltering frames (temporal median, kernel=5)...")
+    boards_filtered = 0
+    
+    for i, input_folder in enumerate(folders_to_filter, 1):
+        output_folder = input_folder.parent / f"{input_folder.name}_filtered"
+        print(f"[{i}/{len(folders_to_filter)}] {input_folder.name} → {output_folder.name}")
+        
+        try:
+            phase2.filter_flir_frames_for_ml(
+                input_folder=str(input_folder),
+                output_folder=str(output_folder),
+                kernel_size=5
+            )
+            boards_filtered += 1
+        except Exception as e:
+            print(f"✗ Error: {e}")
+    
+    print(f"\n{'='*80}\nFiltered {boards_filtered}/{len(folders_to_filter)} boards successfully")
+    print("Filtered frames ready for ML training\n" + "="*80)
+    return boards_filtered
 
 
 def _export_thermistor_timeseries_csv(thermistor_data: Dict, output_file: Path, medium: str = "sand"):
-    """
-    Export compiled thermistor time series to CSV for ML model training.
-    
-    Creates a CSV with Time (s) column and one column per component, suitable for
-    CNN thermal modeling where thermistor measurements serve as ground truth.
-    
-    Args:
-        thermistor_data: Dict mapping component_testID -> DataFrame with Time, Temperature, Component
-        output_file: Path to output CSV file
-        medium: Medium type ("sand" or "air") for logging
-    """
+    """Export thermistor time series to CSV with Time(s) + component columns for ML training."""
     if not thermistor_data:
         print(f"    No {medium} thermistor data to export")
         return
     
     try:
-        # Find all unique components and tests
-        component_test_pairs = {}
-        for key, df in thermistor_data.items():
-            component = df['Component'].iloc[0] if 'Component' in df.columns else key.split('_')[0]
-            test = df['Test'].iloc[0] if 'Test' in df.columns else key.split('_')[-1]
-            component_test_pairs[key] = (component, test)
+        # Extract component names and find longest time series as reference
+        component_test_pairs = {
+            key: (df['Component'].iloc[0] if 'Component' in df.columns else key.split('_')[0],
+                  df['Test'].iloc[0] if 'Test' in df.columns else key.split('_')[-1])
+            for key, df in thermistor_data.items()
+        }
         
-        # Find common time base (use the one with most samples)
-        max_samples = 0
-        reference_time = None
-        for key, df in thermistor_data.items():
-            if len(df) > max_samples:
-                max_samples = len(df)
-                reference_time = df['Time'].values
-        
-        # Start with time column
+        reference_time = max((df['Time'].values for df in thermistor_data.values()), key=len)
         merged_df = pd.DataFrame({'Time (s)': reference_time})
         
-        # Add each component's temperature as a column
+        # Interpolate each component to common time base
         for key, df in thermistor_data.items():
-            component, test = component_test_pairs[key]
+            component, _ = component_test_pairs[key]
             
-            # Interpolate to common time base if needed
             if len(df['Time']) != len(reference_time) or not np.allclose(df['Time'].values, reference_time):
-                # Use interpolation to align to common time base
-                interp_func = interp1d(df['Time'].values, df['Temperature'].values, 
-                                      kind='linear', fill_value='extrapolate')
-                temps = interp_func(reference_time)
+                temp_series = pd.Series(index=df['Time'].values, data=df['Temperature'].values)
+                aligned_series = temp_series.reindex(reference_time)
+                aligned_series = aligned_series.interpolate(method='linear', limit_area='inside')
+                aligned_series = aligned_series.fillna(method='ffill').fillna(method='bfill')
+                temps = aligned_series.values
             else:
                 temps = df['Temperature'].values
             
-            # Column name: just component name
-            # If same component appears multiple times, keep first occurrence
+            # Handle duplicate component names
             col_name = component
             counter = 1
             while col_name in merged_df.columns:
                 col_name = f"{component}_{counter}"
                 counter += 1
-            
             merged_df[col_name] = temps
         
-        # Export to CSV
         merged_df.to_csv(output_file, index=False)
-        print(f"    ✓ Exported {len(merged_df.columns)-1} components to {output_file.name}")
-        print(f"      Time range: {merged_df['Time (s)'].min():.1f}s - {merged_df['Time (s)'].max():.1f}s")
-        print(f"      Total samples: {len(merged_df)}")
+        print(f"    ✓ Exported {len(merged_df.columns)-1} components, "
+              f"{len(merged_df)} samples ({merged_df['Time (s)'].min():.1f}-{merged_df['Time (s)'].max():.1f}s)")
         
     except Exception as e:
         print(f"    ✗ Error exporting {medium} thermistor data: {e}")
-        import traceback
-        traceback.print_exc()
 
 
 def _create_three_condition_plots_from_tests(cal_flir_file, test_configs, calibration_pcb, outputs_path, plot_settings=None):
-    """
-    Helper function to create 3-condition comparison plots from multiple tests.
-    Combines data from ALL tests to show all measured components.
-    
-    Args:
-        cal_flir_file: Path to calibration FLIR CSV
-        test_configs: List of test configurations with therm files and pairs
-        calibration_pcb: Name of calibration PCB
-        outputs_path: Base output directory path
-        plot_settings: Optional dict with plot customization (y_axis_min, y_axis_max, etc.)
-    """
+    """Create 3-condition plots combining data from multiple tests."""
     from loader_thermistor import ThermalDataLoader
-    import viz_phase2_filtering
-    import pandas as pd
+    import viz_phase2_filtering, pandas as pd, phase1_data_loading as phase1, phase2_filtering as phase2, viz_phase3_statistics
     
-    # Load FLIR data once (shared across all tests)
+    # Load FLIR data
     flir_df = pd.read_csv(cal_flir_file)
     time_col = 'reltime' if 'reltime' in flir_df.columns else 'time_s'
+    flir_data = {comp: pd.DataFrame({'Time': flir_df[time_col].values, 'Temperature': flir_df[comp].values})
+                 for comp in flir_df.columns if comp not in ['frame', 'reltime', 'time_s', 'Image']}
     
-    # Convert FLIR dataframe to component dictionaries
-    flir_data = {}
-    for comp in flir_df.columns:
-        if comp in ['frame', 'reltime', 'time_s', 'Image']:
-            continue
-        flir_data[comp] = pd.DataFrame({
-            'Time': flir_df[time_col].values,
-            'Temperature': flir_df[comp].values
-        })
+    # Helper to load thermistor data
+    def load_therm_data(test_configs, medium_key, pairs_key):
+        data, loader = {}, ThermalDataLoader()
+        for cfg in test_configs:
+            if not (therm_file := cfg.get(medium_key)): continue
+            pairs = cfg.get(pairs_key, cfg.get('pairs', []))
+            test_id = cfg.get('test_id', 'unknown')
+            
+            try:
+                x, y, labels, _ = (loader.load_temp_csv(therm_file) if not isinstance(therm_file, list) 
+                                   else loader.load_multi_device_csv(therm_file))
+            except Exception as e:
+                continue
+            
+            for pair in pairs:
+                flir_comp = pair['flir_roi'] if isinstance(pair, dict) else pair[0]
+                therm_chan = pair['therm_channel'] if isinstance(pair, dict) else pair[1]
+                idx = next((i for i, lbl in enumerate(labels) if therm_chan in lbl), None)
+                if idx is not None:
+                    data[f"{flir_comp}_{test_id}"] = pd.DataFrame({
+                        'Time': x, 'Temperature': y[:, idx], 'Component': flir_comp, 'Test': test_id})
+        return data
     
-    # Aggregate data from ALL tests
-    # Note: Same component may be tested in Air Test X but Sand Test Y
-    # So we build separate mappings for air and sand across all tests
-    air_data = {}
-    sand_data = {}
-    loader = ThermalDataLoader()
+    air_data = load_therm_data(test_configs, 'therm_air_file', 'air_pairs')
+    sand_data = load_therm_data(test_configs, 'therm_sand_file', 'sand_pairs')
     
-    # Process each test for AIR measurements
-    print(f"  Collecting AIR measurements from all tests...")
-    for test_config in test_configs:
-        therm_air_file = test_config['therm_air_file']
-        # Use air_pairs if available, otherwise fallback to pairs
-        pairs = test_config.get('air_pairs', test_config.get('pairs', []))
-        test_id = test_config.get('test_id', 'unknown')
-        
-        # Load air thermistor data for this test (skip if loading fails)
-        try:
-            x_air, y_air, labels_air, meta_air = (
-                loader.load_temp_csv(therm_air_file) if not isinstance(therm_air_file, list) 
-                else loader.load_multi_device_csv(therm_air_file)
-            )
-        except Exception as e:
-            print(f"    Skipping {test_id} air data: {e}")
-            continue
-        
-        # Map air thermistor channels to components using pairs
-        for pair in pairs:
-            if isinstance(pair, dict):
-                flir_comp = pair['flir_roi']
-                therm_channel = pair['therm_channel']
-            else:
-                flir_comp, therm_channel, _, _ = pair
-            
-            # Find thermistor channel index in air data
-            air_idx = None
-            for i, label in enumerate(labels_air):
-                if therm_channel in label:
-                    air_idx = i
-                    break
-            
-            # Create unique key: component_testID to allow same component in multiple tests
-            unique_key = f"{flir_comp}_{test_id}"
-            
-            # Add component air data
-            if air_idx is not None:
-                air_data[unique_key] = pd.DataFrame({
-                    'Time': x_air,
-                    'Temperature': y_air[:, air_idx],
-                    'Component': flir_comp,
-                    'Test': test_id
-                })
-                print(f"    {flir_comp} ({test_id}): Air data")
-    
-    # Process each test for SAND measurements
-    print(f"  Collecting SAND measurements from all tests...")
-    for test_config in test_configs:
-        therm_sand_file = test_config.get('therm_sand_file')
-        # Use sand_pairs if available, otherwise fallback to pairs
-        pairs = test_config.get('sand_pairs', test_config.get('pairs', []))
-        test_id = test_config.get('test_id', 'unknown')
-        
-        if not therm_sand_file:
-            continue
-        
-        # Load sand thermistor data for this test (skip if loading fails)
-        try:
-            x_sand, y_sand, labels_sand, meta_sand = (
-                loader.load_temp_csv(therm_sand_file) if not isinstance(therm_sand_file, list) 
-                else loader.load_multi_device_csv(therm_sand_file)
-            )
-        except Exception as e:
-            print(f"    Skipping {test_id} sand data: {e}")
-            continue
-        
-        # Map sand thermistor channels to components using pairs
-        for pair in pairs:
-            if isinstance(pair, dict):
-                flir_comp = pair['flir_roi']
-                therm_channel = pair['therm_channel']
-            else:
-                flir_comp, therm_channel, _, _ = pair
-            
-            # Find thermistor channel index in sand data
-            sand_idx = None
-            for i, label in enumerate(labels_sand):
-                if therm_channel in label:
-                    sand_idx = i
-                    break
-            
-            # Create unique key: component_testID to allow same component in multiple tests
-            unique_key = f"{flir_comp}_{test_id}"
-            
-            # Add component sand data
-            if sand_idx is not None:
-                sand_data[unique_key] = pd.DataFrame({
-                    'Time': x_sand,
-                    'Temperature': y_sand[:, sand_idx],
-                    'Component': flir_comp,
-                    'Test': test_id
-                })
-                print(f"    {flir_comp} ({test_id}): Sand data")
-    
-    # =========================================================================
-    # EXPORT COMPILED THERMISTOR TIME SERIES FOR ML MODEL (CNN TRAINING)
-    # =========================================================================
-    print(f"\n  Exporting compiled thermistor time series for ML model...")
-    
-    # Export SAND thermistor data (for CNN training ground truth)
+    # Export thermistor CSVs for ML
     if sand_data:
-        _export_thermistor_timeseries_csv(
-            sand_data, 
-            outputs_path / f"{calibration_pcb}_thermistor_timeseries.csv",
-            medium="sand"
-        )
-    
-    # Export AIR thermistor data (optional, for reference)
+        _export_thermistor_timeseries_csv(sand_data, outputs_path / f"{calibration_pcb}_thermistor_timeseries.csv", "sand")
     if air_data:
-        _export_thermistor_timeseries_csv(
-            air_data, 
-            outputs_path / f"{calibration_pcb}_air_thermistor_timeseries.csv",
-            medium="air"
-        )
+        _export_thermistor_timeseries_csv(air_data, outputs_path / f"{calibration_pcb}_air_thermistor_timeseries.csv", "air")
     
-    # Build list of component names from FLIR data
-    flir_component_names = set(flir_data.keys())
+    # Find overlapping components
+    get_comps = lambda d: {(v['Component'].iloc[0] if 'Component' in v.columns else k.split('_')[0]) for k,v in d.items()}
+    overlapping = list(set(flir_data.keys()) & get_comps(air_data) & get_comps(sand_data))
     
-    # Extract component names from air and sand unique keys
-    air_components_list = []
-    for key in air_data.keys():
-        if 'Component' in air_data[key].columns:
-            comp_name = air_data[key]['Component'].iloc[0]
-        else:
-            comp_name = key.split('_')[0]
-        air_components_list.append(comp_name)
-    air_component_names = set(air_components_list)
-    
-    sand_components_list = []
-    for key in sand_data.keys():
-        if 'Component' in sand_data[key].columns:
-            comp_name = sand_data[key]['Component'].iloc[0]
-        else:
-            comp_name = key.split('_')[0]
-        sand_components_list.append(comp_name)
-    sand_component_names = set(sand_components_list)
-    
-    # Find components that exist in all three datasets
-    overlapping_components = list(flir_component_names & air_component_names & sand_component_names)
-    
-    if not overlapping_components:
-        print("  No overlapping components found between FLIR, Air, and Sand data")
+    if not overlapping:
+        print("  No overlapping components found")
         return
     
-    print(f"  Found {len(overlapping_components)} overlapping components: {sorted(overlapping_components)}")
-    print(f"  Total air measurements: {len(air_data)}")
-    print(f"  Total sand measurements: {len(sand_data)}")
+    print(f"  Found {len(overlapping)} overlapping components, {len(air_data)} air, {len(sand_data)} sand measurements")
     
-    # Create output directory
+    # Generate plots
     output_dir = outputs_path / "three_condition_comparison"
     output_dir.mkdir(parents=True, exist_ok=True)
     
-    # Generate main combined plot
     output_files, valid_entries = viz_phase2_filtering.create_three_condition_comparison(
-        flir_data=flir_data,
-        air_data=air_data,
-        sand_data=sand_data,
-        component_names=overlapping_components,
-        output_dir=str(output_dir),
-        pcb_name=calibration_pcb,
-        plot_settings=plot_settings
-    )
+        flir_data, air_data, sand_data, overlapping, str(output_dir), calibration_pcb, plot_settings)
     
-    print(f"  Created {len(output_files)} main plot files in {output_dir}")
-    
-    # Generate individual component detail plots
     if valid_entries:
         detail_files = viz_phase2_filtering.create_component_detail_plots(
-            flir_data=flir_data,
-            air_data=air_data,
-            sand_data=sand_data,
-            valid_entries=valid_entries,
-            output_dir=str(output_dir),
-            pcb_name=calibration_pcb,
-            plot_settings=plot_settings
-        )
-        print(f"  Created {len(detail_files)} component detail plots")
+            flir_data, air_data, sand_data, valid_entries, str(output_dir), calibration_pcb, plot_settings)
     
-    # Generate thermal metrics CSV and max temperature plot
-    # Run filtering and analysis on FLIR data to get component statistics
-    import phase1_data_loading as phase1
-    import phase2_filtering as phase2
-    import viz_phase3_statistics
-    
-    # Classify components by type
-    grouped_components = phase1.classify_components(flir_data, custom_groups=None, debug=False)
-    
-    # Apply filtering and analyze temperature transients
-    filtered_flir_data = phase2.apply_filtering_to_component_data(flir_data, filter_type='median', debug=False)
-    analysis_results = phase2.analyze_temperature_transients(flir_data, filter_type='median', debug=False)
-    
-    # Generate thermal metrics visualization (max temp plot + CSV export)
-    print(f"  Generating thermal metrics for {calibration_pcb}...")
-    metrics_files = []
-    viz_phase3_statistics.create_ieee_plots(
-        component_data=filtered_flir_data,
-        grouped_components=grouped_components,
-        analysis_results=analysis_results,
-        output_dir=str(output_dir),
-        pcb_name=calibration_pcb,
-        debug=False
-    )
-    print(f"  Exported thermal metrics: {output_dir}/{calibration_pcb}_component_thermal_metrics.csv")
+    # Generate thermal metrics
+    grouped_components = phase1.classify_components(flir_data, None, False)
+    filtered_flir_data = phase2.apply_filtering_to_component_data(flir_data, 'median', False)
+    analysis_results = phase2.analyze_temperature_transients(flir_data, 'median', False)
+    viz_phase3_statistics.create_ieee_plots(filtered_flir_data, grouped_components, analysis_results, str(output_dir), calibration_pcb, False)
+    print(f"  Created plots and metrics in {output_dir}")
 
 
 def _create_three_condition_plots(cal_flir_file, therm_air_file, therm_sand_file, 
@@ -418,36 +258,11 @@ def _create_three_condition_plots(cal_flir_file, therm_air_file, therm_sand_file
 
 
 def generate_output_folder(workflow: str, debug: bool = False, base_dir: str = "outputs") -> str:
-    """
-    Generate timestamped output folder name.
-    
-    Format: MMDD_HHMM_<workflow>[_debug]
-    Example: 1126_1430_P1-7
-    
-    Args:
-        workflow: Workflow type ('phases_1_5', 'phases_6_7', 'full_pipeline')
-        debug: Whether debug mode is enabled
-        base_dir: Base outputs directory
-        
-    Returns:
-        Full path to auto-generated output directory
-    """
-    now = datetime.now()
-    timestamp = now.strftime("%m%d_%H%M")
-    
-    # Workflow abbreviations
-    workflow_abbrev = {
-        'phases_1_5': 'P1-5',
-        'phases_6_7': 'P6-7',
-        'full_pipeline': 'P1-7'
-    }
-    
+    """Generate timestamped output folder (format: MMDD_HHMM_<workflow>[_debug])."""
+    timestamp = datetime.now().strftime("%m%d_%H%M")
+    workflow_abbrev = {'phases_1_5': 'P1-5', 'phases_6_7': 'P6-7', 'full_pipeline': 'P1-7'}
     abbrev = workflow_abbrev.get(workflow, 'P1-7')
-    folder_name = f"{timestamp}_{abbrev}"
-    
-    if debug:
-        folder_name += "_debug"
-    
+    folder_name = f"{timestamp}_{abbrev}{'_debug' if debug else ''}"
     return str(Path(base_dir) / folder_name)
 
 # Component type definitions for consistent use across phases
@@ -460,50 +275,17 @@ def process_researchir_data(input_folder: str, output_dir: str,
                            filter_type: str = 'median',
                            spatial_enabled: bool = True,
                            debug: bool = False) -> Dict:
-    """
-    Complete ResearchIR thermal data post-processing workflow (Phases 1-5)
-    
-    Executes all 5 phases of thermal analysis:
-    1. Load data from ResearchIR exports
-    2. Apply filtering and analyze transients
-    3. Generate statistical summaries
-    4. Analyze spatial thermal coupling
-    5. Assess potting/embedding risk
-    
-    Args:
-        input_folder: Path to ResearchIR export folder
-        output_dir: Path for output files
-        coordinates_file: Optional CSV with component X,Y coordinates
-        proximity_threshold: Distance threshold for thermal neighbors (mm)
-        filter_type: Filter to apply ('median', 'savgol', 'none', etc.)
-        spatial_enabled: Enable spatial coupling analysis
-        debug: Enable verbose debug output
-    
-    Returns:
-        Dictionary with processing results and output file paths
-    """
-    
-    # Create output directory
+    """Complete ResearchIR thermal processing (Phases 1-5: load, filter, analyze, spatial coupling, potting risk)."""
     os.makedirs(output_dir, exist_ok=True)
+    spatial_status = 'Enabled' if spatial_enabled and coordinates_file else 'Disabled'
+    print(f"{'='*60}\n RESEARCHIR THERMAL DATA POST-PROCESSING (Phases 1-5)\n{'='*60}")
+    print(f"Input: {input_folder}  |  Output: {output_dir}  |  Filter: {filter_type}  |  Spatial: {spatial_status}\n{'='*60}")
     
-    print("="*60)
-    print(" RESEARCHIR THERMAL DATA POST-PROCESSING (Phases 1-5)")
-    print("="*60)
-    print(f"Input folder:  {input_folder}")
-    print(f"Output folder: {output_dir}")
-    print(f"Filter type:   {filter_type}")
-    print(f"Spatial analysis: {'Enabled' if spatial_enabled and coordinates_file else 'Disabled'}")
-    print("="*60)
-    
-    # Extract PCB name from input folder path for plot labeling
-    # Example: "inputs/ResearchIR_Outputs_LoadShedding" -> "LoadShedding"
+    # Extract PCB name from input folder
     pcb_name = None
     if input_folder:
         folder_name = os.path.basename(input_folder.rstrip('/\\'))
-        if 'ResearchIR_Outputs_' in folder_name:
-            pcb_name = folder_name.split('ResearchIR_Outputs_')[-1]
-        else:
-            pcb_name = folder_name
+        pcb_name = folder_name.split('ResearchIR_Outputs_')[-1] if 'ResearchIR_Outputs_' in folder_name else folder_name
     
     # =========================================================================
     # PHASE 1: DATA LOADING
@@ -525,45 +307,30 @@ def process_researchir_data(input_folder: str, output_dir: str,
     analysis_results = phase2.analyze_temperature_transients(
         component_data, filter_type=filter_type, debug=debug)
     
+    print("\n[PHASE 2] Exporting filtered temperatures and filter comparison...")
+    phase2.export_filtered_temperatures(filtered_component_data, output_dir=output_dir, board_name=pcb_name)
+    phase2.export_filter_comparison(component_data, filter_type=filter_type, output_dir=output_dir, board_name=pcb_name, max_components=5)
+    
     # =========================================================================
     # PHASE 3: COMPONENT ANALYSIS
     # =========================================================================
-    print("\n[PHASE 3] Exporting MATLAB data...")
-    mat_file = phase3.export_matlab_data(filtered_component_data,
-                                        grouped_components,
-                                        analysis_results,
-                                        output_dir)
-    
-    print("\n[PHASE 3] Creating summary CSV...")
-    csv_file = phase3.export_summary_csv(grouped_components,
-                                         analysis_results,
-                                         output_dir,
-                                         COMPONENT_TYPES)
+    print("\n[PHASE 3] Exporting MATLAB data, summary CSV, and component statistics...")
+    mat_file = phase3.export_matlab_data(filtered_component_data, grouped_components, analysis_results, output_dir)
+    csv_file = phase3.export_summary_csv(grouped_components, analysis_results, output_dir, COMPONENT_TYPES)
+    phase3.export_component_statistics(filtered_component_data, output_dir=output_dir, board_name=pcb_name)
     
     # =========================================================================
-    # VISUALIZATION: IEEE-FORMAT PLOTS
+    # VISUALIZATION & MATLAB EXPORTS
     # =========================================================================
-    print("\n[VISUALIZATION] Creating IEEE-format summary plots...")
+    print("\n[VISUALIZATION] Creating IEEE plots, filter comparisons, and MATLAB script...")
     plot_files = viz_phase3_statistics.create_ieee_plots(filtered_component_data, grouped_components,
-                                        analysis_results, output_dir, pcb_name=pcb_name, debug=debug)    # =========================================================================
-    # VISUALIZATION: FILTERING COMPARISON
-    # =========================================================================
+                                        analysis_results, output_dir, pcb_name=pcb_name, debug=debug)
     comparison_files = []
     if filter_type != 'none':
-        print(f"\n[VISUALIZATION] Creating {filter_type} filtering comparison plots...")
         comparison_files = viz_phase2_filtering.create_filtering_comparison_plots(
-            component_data, filtered_component_data, grouped_components,
-            output_dir, filter_type=filter_type, debug=debug)
-        
-        print(f"\n[VISUALIZATION] Creating multi-filter comparison grid...")
+            component_data, filtered_component_data, grouped_components, output_dir, filter_type=filter_type, debug=debug)
         multifilter_grid, comparison_df = viz_phase2_filtering.create_multifilter_component_grid(
-            component_data, grouped_components, output_dir, 
-            filter_params={}, debug=debug)
-    
-    # =========================================================================
-    # MATLAB: USAGE SCRIPT
-    # =========================================================================
-    print("\n[MATLAB] Creating MATLAB usage script...")
+            component_data, grouped_components, output_dir, filter_params={}, debug=debug)
     phase3.create_matlab_usage_script(output_dir, grouped_components, COMPONENT_TYPES)
     
     # =========================================================================
@@ -575,25 +342,18 @@ def process_researchir_data(input_folder: str, output_dir: str,
     coupling_plots = []
     
     if spatial_enabled and coordinates_file:
-        print("\n[PHASE 4] Loading component coordinates...")
+        print(f"\n[PHASE 4] Spatial coupling analysis (threshold: {proximity_threshold}mm)...")
         component_coordinates = phase4.load_component_coordinates(coordinates_file, debug=debug)
         
         if component_coordinates:
-            print(f"\n[PHASE 4] Building proximity matrix (threshold: {proximity_threshold}mm)...")
-            proximity_matrix = phase4.build_proximity_matrix(
-                component_data, component_coordinates, proximity_threshold)
+            proximity_matrix = phase4.build_proximity_matrix(component_data, component_coordinates, proximity_threshold)
             
             if proximity_matrix:
-                print("\n[PHASE 4] Calculating thermal coupling metrics...")
-                coupling_metrics = phase4.calculate_thermal_coupling_metrics(
-                    filtered_component_data, proximity_matrix, analysis_results)
-                
-                print(f"  Analyzed thermal coupling for {len(coupling_metrics)} components")
-                
-                print("\n[PHASE 4] Creating thermal coupling visualizations...")
+                coupling_metrics = phase4.calculate_thermal_coupling_metrics(filtered_component_data, proximity_matrix, analysis_results)
+                print(f"  Analyzed {len(coupling_metrics)} components, exporting matrix and visualizations...")
+                phase4.export_coupling_matrix(proximity_matrix, filtered_component_data, output_dir=output_dir, board_name=pcb_name)
                 coupling_plots = viz_phase4_coupling.create_thermal_coupling_visualizations(
-                    filtered_component_data, coupling_metrics, analysis_results,
-                    output_dir, component_coordinates, debug=debug)
+                    filtered_component_data, coupling_metrics, analysis_results, output_dir, component_coordinates, debug=debug)
     
     # =========================================================================
     # PHASE 5: POTTING RISK (requires coupling metrics from Phase 4)
@@ -606,78 +366,32 @@ def process_researchir_data(input_folder: str, output_dir: str,
         risk_csv, risk_df = phase5.analyze_potted_condition_risk(
             coupling_metrics, analysis_results, output_dir)
     
-    # =========================================================================
-    # RESULTS SUMMARY
-    # =========================================================================
-    results = {
-        'input_folder': input_folder,
-        'output_dir': output_dir,
-        'total_components': len(component_data),
-        'component_groups': grouped_components,
-        'analysis_results': analysis_results,
-        'coupling_metrics': coupling_metrics,
-        'risk_analysis_df': risk_df,
-        'output_files': {
-            'plots': plot_files,
-            'comparison_plots': comparison_files,
-            'coupling_plots': coupling_plots,
-            'matlab': mat_file,
-            'summary_csv': csv_file,
-            'risk_csv': risk_csv
-        }
+    # Results summary
+    coupling_info = f", {len(coupling_metrics)} spatial couplings" if coupling_metrics else ""
+    print(f"\n{'='*60}\n PHASES 1-5 COMPLETE: {len(component_data)} components, {len(grouped_components)} groups{coupling_info}\n Output: {output_dir}\n{'='*60}")
+    
+    return {
+        'input_folder': input_folder, 'output_dir': output_dir, 'total_components': len(component_data),
+        'component_groups': grouped_components, 'analysis_results': analysis_results,
+        'coupling_metrics': coupling_metrics, 'risk_analysis_df': risk_df,
+        'output_files': {'plots': plot_files, 'comparison_plots': comparison_files, 'coupling_plots': coupling_plots,
+                        'matlab': mat_file, 'summary_csv': csv_file, 'risk_csv': risk_csv}
     }
-    
-    print("\n" + "="*60)
-    print(" PHASES 1-5 COMPLETE")
-    print("="*60)
-    print(f"Total components processed: {len(component_data)}")
-    print(f"Component groups: {len(grouped_components)}")
-    if coupling_metrics:
-        print(f"Spatial coupling analysis: {len(coupling_metrics)} components")
-    print(f"\nOutput files saved to: {output_dir}")
-    print("="*60)
-    
-    return results
 
 
-def validate_thermal_config(multi_session_config: str = None, 
-                           verbose: bool = False) -> bool:
-    """
-    Validate thermal modeling configuration without processing.
-    
-    Supports both legacy session-based and new board-based configs.
-    
-    Performs comprehensive validation checks:
-    - Configuration file structure and JSON syntax
-    - Required fields present in all sessions/tests
-    - File paths exist (FLIR, thermistor files)
-    - Channel naming conventions (Device prefix for multi-device)
-    - Component pair definitions
-    
-    Args:
-        multi_session_config: Path to JSON config file (sessions or boards)
-        verbose: Show detailed validation output
-        
-    Returns:
-        True if all validation checks pass, False otherwise
-    """
-    from viz_phase6_validation import (validate_multi_session_config, 
-                                        validate_multi_board_config)
+def validate_thermal_config(multi_session_config: str = None, verbose: bool = False) -> bool:
+    """Validate thermal modeling config (session-based or board-based) without processing."""
+    from viz_phase6_validation import validate_multi_session_config, validate_multi_board_config
     import json
     
-    print("="*80)
-    print(" THERMAL CALIBRATION CONFIGURATION VALIDATION")
-    print("="*80)
+    print(f"{'='*80}\n THERMAL CALIBRATION CONFIGURATION VALIDATION\n{'='*80}")
     
     if not multi_session_config:
-        print("\n✗ Error: No configuration file specified")
-        print("  Use --multi_session_config <config.json> to specify config file")
+        print("\n✗ Error: No configuration file specified\n  Use --multi_session_config <config.json>")
         return False
     
-    print(f"\nValidating configuration: {multi_session_config}")
-    print("-"*80)
+    print(f"\nValidating: {multi_session_config}\n{'-'*80}")
     
-    # Detect config format (session-based vs board-based)
     try:
         with open(multi_session_config, 'r') as f:
             config = json.load(f)
@@ -689,72 +403,51 @@ def validate_thermal_config(multi_session_config: str = None,
     is_session_based = 'sessions' in config
     
     if is_board_based:
-        print(f"  Config type: Board-based (hierarchical)")
-        result = validate_multi_board_config(
-            config_file=multi_session_config,
-            verbose=verbose
-        )
+        print("  Config type: Board-based (hierarchical)")
+        result = validate_multi_board_config(config_file=multi_session_config, verbose=verbose)
     elif is_session_based:
-        print(f"  Config type: Session-based (legacy)")
-        result = validate_multi_session_config(
-            config_path=multi_session_config,
-            check_files_exist=True,
-            verbose=verbose
-        )
+        print("  Config type: Session-based (legacy)")
+        result = validate_multi_session_config(config_path=multi_session_config, check_files_exist=True, verbose=verbose)
     else:
         print("\n✗ Error: Config must have either 'boards' or 'sessions' field")
         return False
     
-    # Print summary (unified format for both types)
+    # Print summary
     if not verbose:
-        print("\n" + "="*80)
-        print(" VALIDATION SUMMARY")
-        print("="*80)
+        print(f"\n{'='*80}\n VALIDATION SUMMARY\n{'='*80}")
         
         if result['valid']:
             print("\n✓ ALL VALIDATION CHECKS PASSED")
             
             if is_board_based:
-                print(f"\n  Total boards: {result['stats']['board_count']}")
-                print(f"  Total tests: {result['stats']['test_count']}")
-                print(f"  Total components: {result['stats']['component_count']}")
+                print(f"\n  Boards: {result['stats']['board_count']}  |  Tests: {result['stats']['test_count']}  |  Components: {result['stats']['component_count']}")
             else:
-                print(f"\n  Total sessions: {result['stats']['total_sessions']}")
-                print(f"  Total component pairs: {result['stats']['total_pairs']}")
-                
-                # Show session breakdown
-                print(f"\n  Session Breakdown:")
+                print(f"\n  Sessions: {result['stats']['total_sessions']}  |  Component pairs: {result['stats']['total_pairs']}\n\n  Session Breakdown:")
                 for i, session_result in enumerate(result['session_results'], 1):
                     session_name = result['config']['sessions'][i-1]['name']
                     num_pairs = session_result['stats']['num_pairs']
-                    is_multi = session_result['stats'].get('is_multi_device', False)
-                    device_str = "(multi-device)" if is_multi else "(single-device)"
+                    device_str = "(multi-device)" if session_result['stats'].get('is_multi_device', False) else "(single-device)"
                     print(f"    {i}. {session_name}: {num_pairs} components {device_str}")
             
-            print(f"\n  Ready to process!")
-            print(f"  Run without --validate to execute full workflow.")
+            print("\n  Ready to process! Run without --validate to execute workflow.")
             
         else:
-            print("\n✗ VALIDATION FAILED")
-            print(f"\n  Found {len(result['errors'])} error(s)")
-            
-            # Show errors
+            print(f"\n✗ VALIDATION FAILED - {len(result['errors'])} error(s)")
             if result['errors']:
                 print("\n  Errors:")
-                for err in result['errors'][:20]:  # Show first 20
+                for err in result['errors'][:20]:
                     print(f"    • {err}")
                 if len(result['errors']) > 20:
                     print(f"    ... and {len(result['errors']) - 20} more errors")
         
-        # Show warnings (even if validation passed)
         if result['warnings']:
             print(f"\n  ⚠ Warnings ({len(result['warnings'])}):")
-            for warn in result['warnings'][:20]:  # Show first 20
+            for warn in result['warnings'][:20]:
                 print(f"    • {warn}")
             if len(result['warnings']) > 20:
                 print(f"    ... and {len(result['warnings']) - 20} more warnings")
         
-        print("\n" + "="*80)
+        print(f"\n{'='*80}")
     
     return result['valid']
 
@@ -770,201 +463,62 @@ def process_thermal_modeling(calibration_pcb: str, prediction_pcb: str,
                            convergence_analysis: bool = False) -> Dict:
     """
     Execute thermal modeling workflow (Phases 6 & 7).
+    Phase 6: Calibrate using PCB with both FLIR and thermistor data
+    Phase 7: Predict temperatures using calibration on FLIR-only PCB
     
-    Phase 6: Calibration using PCB with both FLIR and thermistor data
-    Phase 7: Prediction using calibration to estimate temperatures on FLIR-only PCB
-    
-    CALIBRATION MODES
-    ==================
-    1. Standard: Single test session, replace existing calibration
-    2. Incremental: Single test session, append to existing calibration
-    3. Multi-Session: Batch process multiple test sessions at once
-    
-    CONFIGURATION EXAMPLES
-    ======================
-    
-    Single-Device Configuration (e.g., USB-TEMP with 6 channels):
-    -------------------------------------------------------------
-    {
-      "sessions": [{
-        "name": "Batch1_Test3_LoadShedding",
-        "pcb": "Load_Shedding",
-        "flir_file": "outputs/1205_1106_P1-7/Load_Shedding/Test_3_FLIR_Camera_Results_5_of_7.csv",
-        "therm_air_file": "inputs/AIR_usb_temp_20241205_1200.csv",
-        "therm_sand_file": "inputs/SAND_usb_temp_20241205_1200.csv",
-        "pairs": [
-          {"flir_roi": "U3", "therm_air_chan": "AI0", "therm_sand_chan": "AI0"},
-          {"flir_roi": "U1", "therm_air_chan": "AI1", "therm_sand_chan": "AI1"},
-          {"flir_roi": "J1", "therm_air_chan": "AI2", "therm_sand_chan": "AI2"}
-        ]
-      }]
-    }
-    
-    Multi-Device Configuration (e.g., USB-TEMP + USB-TEMP-AI = 8 channels):
-    -----------------------------------------------------------------------
-    IMPORTANT: When using multiple thermistor devices, channel names MUST include 
-    device prefix (Device0_AI0, Device1_AI4, etc.) to avoid conflicts!
-    
-    {
-      "sessions": [{
-        "name": "Batch2_MultiDevice_LoadShedding",
-        "pcb": "Load_Shedding",
-        "flir_file": "outputs/1205_1106_P1-7/Load_Shedding/Load_Shedding_FLIR_AllComponents.csv",
-        "therm_air_file": [
-          "inputs/AIR_usb_temp_device0_20241205.csv",    # Device 0: AI0-AI5 (6 ch)
-          "inputs/AIR_usb_temp_device1_20241205.csv"     # Device 1: AI4-AI5 (2 ch)
-        ],
-        "therm_sand_file": [
-          "inputs/SAND_usb_temp_device0_20241205.csv",
-          "inputs/SAND_usb_temp_device1_20241205.csv"
-        ],
-        "pairs": [
-          {"flir_roi": "U2", "therm_air_chan": "Device0_AI0", "therm_sand_chan": "Device0_AI0"},
-          {"flir_roi": "R5", "therm_air_chan": "Device0_AI1", "therm_sand_chan": "Device0_AI1"},
-          {"flir_roi": "C3", "therm_air_chan": "Device1_AI4", "therm_sand_chan": "Device1_AI4"},
-          {"flir_roi": "L1", "therm_air_chan": "Device1_AI5", "therm_sand_chan": "Device1_AI5"}
-        ]
-      }]
-    }
-    
-    EXPECTED OUTPUT STRUCTURE
-    =========================
-    outputs/{timestamp}_P6-7/
-    ├── calibration_database/
-    │   ├── {SessionName}/                      # One folder per session
-    │   │   ├── raw_inputs_overview.png         # All FLIR + thermistor channels
-    │   │   └── detailed_plots/                 # Per-component comparisons
-    │   │       ├── {Component}_flir_vs_air.png
-    │   │       ├── {Component}_flir_vs_air.pdf
-    │   │       ├── {Component}_flir_vs_sand.png
-    │   │       └── {Component}_flir_vs_sand.pdf
-    │   ├── thermal_calibration_points.csv      # Aggregate calibration database
-    │   ├── thermal_calibration_by_type.csv     # Per-component-type calibrations
-    │   └── thermal_calibration_summary.png     # Calibration quality visualization
-    └── {prediction_pcb}/
-        └── thermal_predictions.csv             # Phase 7 predictions
-    
-    CHANNEL NAMING CONVENTIONS
-    ==========================
-    Single Device:  Use channel names as-is (AI0, AI1, AI2, ...)
-    Multi-Device:   Use Device{N}_{Channel} format (Device0_AI0, Device1_AI4, ...)
-                    The loader automatically prefixes channels when merging multiple files.
-    
-    TROUBLESHOOTING
-    ===============
-    - "Channel not found": Check device prefix if using multiple devices
-    - "Empty calibration database": Verify FLIR ROI names match thermistor mappings
-    - "Merge conflict": Ensure multi-device files use unique device IDs
-    - "Missing plots": Check that session name is unique and valid for filesystem
-    
-    Args:
-        calibration_pcb: Name of PCB to use for calibration (e.g., "Load_Shedding")
-        prediction_pcb: Name of PCB to predict temperatures for (e.g., "HBridge_15s")
-        calibration_mapping: Path to thermistor mapping JSON file
-        inputs_dir: Input directory containing ResearchIR and thermistor data
-        outputs_dir: Output directory for results
-        debug: Enable debug output
-        append_calibration: If True, load existing calibration database and append new 
-                          measurements instead of replacing. Enables incremental data 
-                          collection across multiple weeks/test sessions.
-        test_session: Optional test session name/ID for tracking (e.g., "LoadShedding_Week1").
-                     Used to identify which test session contributed which measurements.
-                     Auto-generated if not provided.
-        multi_session_config: Path to JSON config file containing multiple test sessions.
-                            When provided, processes all sessions in batch and ignores
-                            single-session parameters. Format: {"sessions": [{...}, ...]}
-        convergence_analysis: If True, automatically run convergence analysis after 
-                            calibration to visualize quality improvement and identify
-                            component types needing more calibration data.
-    
-    Returns:
-        Dictionary with processing results and output file paths
-        
-    CLI Usage Examples:
-        # Validate configuration before running
-        python researchir_post_processor.py --thermal_modeling \\
-            --multi_session_config my_config.json --validate
-        
-        # Standard multi-session processing
-        python researchir_post_processor.py --thermal_modeling \\
-            --multi_session_config my_config.json --convergence_analysis
-        
-        # Incremental mode (append to existing calibration)
-        python researchir_post_processor.py --thermal_modeling \\
-            --append_calibration --test_session "Week2"
+    Modes: Standard (single session), Incremental (append), Multi-Session (batch process from JSON config)
+    Multi-device thermistor: Use Device{N}_{Channel} naming (Device0_AI0, Device1_AI4, etc.)
+    See multi_session_config_example.json for config format.
     """
     inputs_path = Path(inputs_dir)
     
-    # Auto-generate output directory if not specified
     if outputs_dir is None:
-        from datetime import datetime
         timestamp = datetime.now().strftime('%m%d_%H%M')
         outputs_path = Path(f"outputs/{timestamp}_P6-7")
-        print(f"\nAuto-generated output directory: {outputs_path}")
+        print(f"\\nAuto-generated output directory: {outputs_path}")
     else:
         outputs_path = Path(outputs_dir)
     
     outputs_path.mkdir(parents=True, exist_ok=True)
     
-    print("="*80)
-    print(" THERMAL MODELING WORKFLOW (Phases 6 & 7)")
-    print("="*80)
-    print(f"Calibration PCB: {calibration_pcb}")
-    print(f"Prediction PCB:  {prediction_pcb}")
-    print(f"Mapping file:    {calibration_mapping}")
-    print("="*80)
+    print(f"{'='*80}\\n THERMAL MODELING WORKFLOW (Phases 6 & 7)\\n{'='*80}")
+    print(f"Calibration: {calibration_pcb}  |  Prediction: {prediction_pcb}  |  Mapping: {calibration_mapping}\\n{'='*80}")
     
     # =========================================================================
     # PARSE RESEARCHIR DATA (both PCBs)
     # =========================================================================
     print("\n[DATA PARSING] Parsing ResearchIR Stats files...")
     
-    # Parse calibration PCB FLIR data
+    # Parse calibration PCB
     cal_researchir_dir = inputs_path / f"ResearchIR_Outputs_{calibration_pcb}"
     if not cal_researchir_dir.exists():
         raise FileNotFoundError(f"Calibration ResearchIR directory not found: {cal_researchir_dir}")
     
-    print(f"\n  Parsing {calibration_pcb} FLIR data...")
     cal_parser = ResearchIRStatsParser(cal_researchir_dir)
     cal_flir_df = cal_parser.parse_all_frames()
-    
     cal_output_dir = outputs_path / calibration_pcb
     cal_output_dir.mkdir(parents=True, exist_ok=True)
     cal_flir_file = cal_output_dir / f"{calibration_pcb}_FLIR_AllComponents.csv"
     cal_flir_df.to_csv(cal_flir_file, index=False)
-    print(f"  Saved: {cal_flir_file}")
+    print(f"  {calibration_pcb}: {cal_flir_file}")
     
-    # Parse prediction PCB FLIR data
+    # Parse prediction PCB
     pred_researchir_dir = inputs_path / f"ResearchIR_Outputs_{prediction_pcb}"
     if not pred_researchir_dir.exists():
         raise FileNotFoundError(f"Prediction ResearchIR directory not found: {pred_researchir_dir}")
     
-    print(f"\n  Parsing {prediction_pcb} FLIR data...")
     pred_parser = ResearchIRStatsParser(pred_researchir_dir)
     pred_flir_df = pred_parser.parse_all_frames()
-    
     pred_output_dir = outputs_path / prediction_pcb
     pred_output_dir.mkdir(parents=True, exist_ok=True)
     pred_flir_file = pred_output_dir / f"{prediction_pcb}_FLIR_AllComponents.csv"
     pred_flir_df.to_csv(pred_flir_file, index=False)
-    print(f"  Saved: {pred_flir_file}")
+    print(f"  {prediction_pcb}: {pred_flir_file}")
     
     # =========================================================================
     # PHASE 6: THERMAL CALIBRATION
     # =========================================================================
-    # Supports three calibration modes:
-    #   1. Standard: Single test session, replace existing calibration
-    #   2. Incremental: Single test session, append to existing calibration
-    #   3. Multi-Session: Batch process multiple test sessions
-    # 
-    # Incremental mode enables week-by-week data collection where each test
-    # session adds new measurements to the calibration database. The system
-    # tracks which session contributed which measurements for convergence
-    # analysis and quality assessment.
-    # =========================================================================
-    print("\n" + "="*80)
-    print("[PHASE 6] THERMAL CALIBRATION")
-    print("="*80)
+    print(f"\n{'='*80}\n[PHASE 6] THERMAL CALIBRATION\n{'='*80}")
     
     # Find thermistor files
     therm_air_file = list(inputs_path.glob("*AIR*usb_temp*.csv"))
@@ -976,12 +530,10 @@ def process_thermal_modeling(calibration_pcb: str, prediction_pcb: str,
     therm_air_file = therm_air_file[0]
     therm_sand_file = therm_sand_file[0] if therm_sand_file else None
     
-    print(f"\nUsing thermistor files:")
-    print(f"  Air:  {therm_air_file.name}")
-    if therm_sand_file:
-        print(f"  Sand: {therm_sand_file.name}")
+    therm_files_msg = f"Air: {therm_air_file.name}" + (f" | Sand: {therm_sand_file.name}" if therm_sand_file else "")
+    print(f"\nThermistor files: {therm_files_msg}")
     
-    # Load mapping configuration
+    # Load mapping and build pairs
     mapping_path = Path(calibration_mapping)
     if not mapping_path.exists():
         raise FileNotFoundError(f"Mapping file not found: {mapping_path}")
@@ -989,219 +541,117 @@ def process_thermal_modeling(calibration_pcb: str, prediction_pcb: str,
     with open(mapping_path, 'r') as f:
         mapping_config = json.load(f)
     
-    # Build measurement pairs from mapping
     pairs = []
     for therm_channel, mapping_data in mapping_config["thermistor_to_flir_mapping"].items():
+        if "ambient" in mapping_data.get("notes", "").lower():
+            continue
         flir_comp = mapping_data["flir_component"]
         comp_type = mapping_data["component_type"]
-        
-        # Skip ambient measurements
-        if "ambient" in mapping_data.get("notes", "").lower():
-            print(f"  Skipping {therm_channel} -> {flir_comp} (ambient)")
-            continue
-        
         pairs.append((flir_comp, therm_channel, f"{flir_comp}_{comp_type}", comp_type))
-        print(f"  Pair: {therm_channel} -> {flir_comp} ({comp_type})")
+    print(f"  Built {len(pairs)} measurement pairs")
     
     # Run Phase 6 calibration
     cal_db_dir = outputs_path / "calibration_database"
     calibrator = phase6.ThermalCalibrator(output_dir=cal_db_dir)
     
-    # Incremental Mode: Load existing calibration database if appending
-    # This enables week-by-week data collection where new measurements are
-    # added to the existing database rather than replacing it
     if append_calibration:
         existing_file = cal_db_dir / "thermal_calibration_points.csv"
         calibrator.load_existing_calibration(existing_file)
     
-    # Multi-Session Mode: Process multiple test sessions from config file
-    # Each session can have different components, thermistor channels, and
-    # sand cooling availability (air-only sessions supported)
-    # 
-    # Supports two config formats:
-    # 1. Legacy session-based: {"sessions": [...]}
-    # 2. New board-based: {"boards": [{name, pcb, tests: [...]}]}
+    # Multi-Session Mode: Process sessions from config file
     if multi_session_config:
-        print(f"\n[MULTI-SESSION MODE] Loading config: {multi_session_config}")
+        print(f"\n[MULTI-SESSION MODE] Loading: {multi_session_config}")
         with open(multi_session_config, 'r') as f:
             multi_config = json.load(f)
         
-        # Detect config format and process accordingly
         if 'boards' in multi_config:
-            print(f"  Config format: Board-based (hierarchical)")
+            print("  Config format: Board-based (hierarchical)")
             calibrator.add_measurement_boards(multi_config['boards'])
             
-            # Generate three-condition comparison plots for each board (all tests combined)
+            # Generate three-condition comparison plots for each board
             print("\n[VISUALIZATION] Creating three-condition comparison plots...")
             for board_config in multi_config['boards']:
                 pcb_name = board_config['name']
-                pcb_file = board_config.get('pcb', f"{pcb_name}.brd")
                 tests = board_config.get('tests', [])
                 
                 if not tests:
-                    print(f"  Skipping {pcb_name}: No tests found")
                     continue
                 
-                print(f"\n  Processing board: {pcb_name}")
-                
-                # Parse this board's FLIR data
+                # Parse board FLIR data
                 board_researchir_dir = inputs_path / f"ResearchIR_Outputs_{pcb_name}"
                 if not board_researchir_dir.exists():
-                    print(f"  WARNING: FLIR directory not found: {board_researchir_dir}")
-                    print(f"  Skipping {pcb_name} visualization...")
+                    print(f"  WARNING: Skipping {pcb_name} - FLIR directory not found")
                     continue
                 
-                print(f"  Parsing {pcb_name} FLIR data...")
                 board_parser = ResearchIRStatsParser(board_researchir_dir)
                 board_flir_df = board_parser.parse_all_frames()
-                
                 board_output_dir = outputs_path / pcb_name
                 board_output_dir.mkdir(parents=True, exist_ok=True)
                 board_flir_file = board_output_dir / f"{pcb_name}_FLIR_AllComponents.csv"
                 board_flir_df.to_csv(board_flir_file, index=False)
-                print(f"  Saved: {board_flir_file}")
+                print(f"  {pcb_name}: Saved {board_flir_file}")
                 
-                # Extract plot settings for this board
                 plot_settings = board_config.get('plot_settings', {})
-                
-                _create_three_condition_plots_from_tests(
-                    cal_flir_file=board_flir_file,
-                    test_configs=tests,
-                    calibration_pcb=pcb_name,
-                    outputs_path=outputs_path,
-                    plot_settings=plot_settings
-                )
+                _create_three_condition_plots_from_tests(board_flir_file, tests, pcb_name, outputs_path, plot_settings)
                 
         elif 'sessions' in multi_config:
-            print(f"  Config format: Session-based (legacy)")
+            print("  Config format: Session-based (legacy)")
             calibrator.add_measurement_sessions(multi_config['sessions'])
         else:
             raise ValueError("Config must contain either 'boards' or 'sessions' field")
     else:
         # Single session mode
-        calibrator.add_measurement_pair(
-            flir_file=cal_flir_file,
-            therm_air_file=therm_air_file,
-            therm_sand_file=therm_sand_file,
-            pairs=pairs,
-            pcb_name=calibration_pcb,
-            test_session=test_session
-        )
-        
-        # Generate detailed comparison plots (Test_X style time-series plots)
-        # DISABLED - Not needed for multi-test workflow
-        # calibrator.generate_detailed_comparison_plots(
-        #     flir_file=cal_flir_file,
-        #     therm_air_file=therm_air_file,
-        #     therm_sand_file=therm_sand_file,
-        #     pairs=pairs,
-        #     output_subdir="detailed_plots"
-        # )
-        
-        # Generate three-condition comparison plots (FLIR + Air + Sand)
+        calibrator.add_measurement_pair(cal_flir_file, therm_air_file, therm_sand_file, pairs, calibration_pcb, test_session)
         print("\n[VISUALIZATION] Creating three-condition comparison plots...")
-        _create_three_condition_plots(
-            cal_flir_file=cal_flir_file,
-            therm_air_file=therm_air_file,
-            therm_sand_file=therm_sand_file,
-            pairs=pairs,
-            calibration_pcb=calibration_pcb,
-            outputs_path=outputs_path
-        )
+        _create_three_condition_plots(cal_flir_file, therm_air_file, therm_sand_file, pairs, calibration_pcb, outputs_path)
     
     calibrator.compute_component_type_calibrations()
     
-    # Check if validation mode is enabled in config
+    # Check for validation mode in config
     if multi_session_config:
         with open(multi_session_config, 'r') as f:
-            multi_config = json.load(f)
-        
-        calibration_mode = multi_config.get('calibration_mode', 'normal')
-        
-        if calibration_mode == 'validation':
-            print(f"\n[VALIDATION MODE] Running calibration quality assessment...")
-            calibrator.run_validation_workflow()
+            if json.load(f).get('calibration_mode') == 'validation':
+                print("\n[VALIDATION MODE] Running calibration quality assessment...")
+                calibrator.run_validation_workflow()
     
-    calibrator.export_calibration_database(
-        prefix="thermal_calibration",
-        run_convergence_analysis=convergence_analysis
-    )
-    
-    print(f"\nCalibration database created:")
-    print(f"  {cal_db_dir / 'thermal_calibration_points.csv'}")
-    print(f"  {cal_db_dir / 'thermal_calibration_by_type.csv'}")
-    print(f"  {cal_db_dir / 'thermal_calibration_metadata.json'}")
-    
-    # Store calibration database path for Phase 8
+    calibrator.export_calibration_database(prefix="thermal_calibration", run_convergence_analysis=convergence_analysis)
     calibration_points_file = cal_db_dir / 'thermal_calibration_points.csv'
+    print(f"\nCalibration database: {cal_db_dir}")
     
     # =========================================================================
     # PHASE 7: THERMAL PREDICTION
     # =========================================================================
-    print("\n" + "="*80)
-    print("[PHASE 7] THERMAL PREDICTION")
-    print("="*80)
+    print(f"\n{'='*80}\n[PHASE 7] THERMAL PREDICTION\n{'='*80}")
     
-    # Load calibration database
     calibration_file = cal_db_dir / "thermal_calibration_by_type.csv"
     
-    # Load component type patterns
+    # Load component patterns
     patterns_file = Path(__file__).parent / "component_type_patterns.json"
     if patterns_file.exists():
         with open(patterns_file, 'r') as f:
-            patterns_config = json.load(f)
-        component_patterns = patterns_config["patterns"]
-        print(f"\nUsing component patterns from: {patterns_file.name}")
+            component_patterns = json.load(f)["patterns"]
+        print(f"Using component patterns: {patterns_file.name}")
     else:
-        # Default patterns
-        component_patterns = {
-            "PowerSupply": [r"^PS\d+$", r"^CONV$"],
-            "IC": [r"^U\d+$", r"^IC\d+$"],
-            "Resistor": [r"^R\d+$"],
-            "LED": [r"^DL\d+$", r"^CR\d+$"]
-        }
-        print("\nUsing default component patterns")
+        component_patterns = {"PowerSupply": [r"^PS\d+$", r"^CONV$"], "IC": [r"^U\d+$", r"^IC\d+$"],
+                              "Resistor": [r"^R\d+$"], "LED": [r"^DL\d+$", r"^CR\d+$"]}
+        print("Using default component patterns")
     
-    # Run Phase 7 prediction
-    print(f"\nPredicting temperatures for {prediction_pcb}...")
+    print(f"\nPredicting for {prediction_pcb}...")
     predictor = phase7.ThermalPredictor(calibration_file=calibration_file, output_dir=pred_output_dir, verbose=debug)
-    
-    # Set component type mapping from patterns
-    # Build mapping from component patterns by checking each component name against patterns
-    # This will be done automatically in predict_from_flir using _determine_component_type()
-    
-    # Run prediction
-    df_predictions = predictor.predict_from_flir(
-        flir_file=pred_flir_file,
-        pcb_name=prediction_pcb,
-        use_median_offset=True
-    )
-    
-    # Export results
+    df_predictions = predictor.predict_from_flir(pred_flir_file, prediction_pcb, use_median_offset=True)
     predictor.export_predictions(df_predictions, prefix=f"thermal_prediction_{prediction_pcb}")
+    print(f"Predictions exported to: {pred_output_dir}")
     
-    print(f"\nPredictions exported to: {pred_output_dir}")
+    # Results summary
+    print(f"\n{'='*80}\n PHASES 6-7 COMPLETE\n{'='*80}")
     
-    # =========================================================================
-    # RESULTS SUMMARY
-    # =========================================================================
-    results = {
-        'calibration_pcb': calibration_pcb,
-        'prediction_pcb': prediction_pcb,
-        'calibration_database': str(cal_db_dir),
-        'calibration_points_file': str(calibration_points_file),
+    return {
+        'calibration_pcb': calibration_pcb, 'prediction_pcb': prediction_pcb,
+        'calibration_database': str(cal_db_dir), 'calibration_points_file': str(calibration_points_file),
         'prediction_output_dir': str(pred_output_dir),
-        'output_files': {
-            'calibration_points': str(cal_db_dir / 'thermal_calibration_points.csv'),
-            'calibration_by_type': str(cal_db_dir / 'thermal_calibration_by_type.csv'),
-        }
+        'output_files': {'calibration_points': str(cal_db_dir / 'thermal_calibration_points.csv'),
+                        'calibration_by_type': str(cal_db_dir / 'thermal_calibration_by_type.csv')}
     }
-    
-    print("\n" + "="*80)
-    print(" PHASES 6-7 COMPLETE")
-    print("="*80)
-    
-    return results
 
 
 def process_ml_training(calibration_points_file: str,
@@ -1213,8 +663,6 @@ def process_ml_training(calibration_points_file: str,
     
     Train OLS linear regression model to predict sand embedded temperatures
     from FLIR air measurements using component type as additional feature.
-    
-    Model: ΔT_sand = β₀ + β₁·ΔT_flir_air + β₂·is_IC + β₃·is_Resistor + ... + ε
     
     Args:
         calibration_points_file: Path to thermal_calibration_points.csv (from Phase 6)
@@ -1234,118 +682,48 @@ def process_ml_training(calibration_points_file: str,
     print(f"Training PCB: {pcb_filter}")
     print(f"Calibration data: {calibration_points_file}")
     print("="*80)
-    
-    # =========================================================================
-    # PHASE 8: ML TRAINING
-    # =========================================================================
-    print("\n" + "="*80)
-    print("[PHASE 8] MACHINE LEARNING TRAINING")
+    print("\nNOTE: Linear regression model temporarily disabled")
+    print("Will be replaced with CNN-based thermal prediction wrapper")
+    print("See ml_model/cnn_thermal_modeling/ for new U-Net approach")
     print("="*80)
     
-    # Initialize ML predictor (outputs_dir already includes ml_model if needed)
-    predictor = phase8.ThermalMLPredictor(output_dir=str(outputs_path), verbose=True)
-    
-    # Load training data
-    predictor.load_training_data(
-        calibration_csv=calibration_points_file,
-        pcb_filter=pcb_filter
-    )
-    
-    # Calculate delta T for each component
-    predictor.calculate_delta_t()
-    
-    # Prepare feature matrix with one-hot encoded component types
-    predictor.prepare_feature_matrix()
-    
-    # Train OLS model
-    predictor.train_model()
-    
-    # Calculate performance metrics
-    metrics = predictor.calculate_metrics()
-    
-    # Export model and metrics
-    predictor.export_model()
-    predictor.export_metrics()
-    predictor.export_training_data()
-    
-    # =========================================================================
-    # VISUALIZATION: ML RESULTS
-    # =========================================================================
-    print("\n[VISUALIZATION] Creating ML model plots...")
-    
-    # Get predictions for visualization
-    y_true, y_pred, component_types = predictor.get_predictions_for_visualization()
-    component_names = predictor.component_names
-    
-    # Create predicted vs actual plot
-    plot_path = viz_phase8_ml_results.create_predicted_vs_actual_plot(
-        y_true=y_true,
-        y_pred=y_pred,
-        component_types=component_types,
-        output_dir=str(outputs_path),
-        pcb_name=pcb_filter,
-        component_names=component_names,
-        metrics=metrics
-    )
-    
-    # Create regression feature plot (shows actual model relationship)
-    flir_delta_t = predictor.df_features['delta_t_flir_air'].values
-    regression_feature_path = viz_phase8_ml_results.create_regression_feature_plot(
-        flir_delta_t=flir_delta_t,
-        y_true=y_true,
-        y_pred=y_pred,
-        component_types=component_types,
-        output_dir=str(outputs_path),
-        pcb_name=pcb_filter
-    )
-    
-    # Create residual plot (optional diagnostic)
-    residual_path = viz_phase8_ml_results.create_residual_plot(
-        y_true=y_true,
-        y_pred=y_pred,
-        component_types=component_types,
-        output_dir=str(outputs_path),
-        pcb_name=pcb_filter
-    )
-    
-    # Create component type comparison (optional diagnostic)
-    type_comparison_path = viz_phase8_ml_results.create_component_type_comparison(
-        y_true=y_true,
-        y_pred=y_pred,
-        component_types=component_types,
-        output_dir=str(outputs_path),
-        pcb_name=pcb_filter
-    )
-    
-    # =========================================================================
-    # RESULTS SUMMARY
-    # =========================================================================
-    results = {
+    # Placeholder return to maintain API compatibility
+    return {
         'pcb_name': pcb_filter,
-        'n_components': len(y_true),
-        'metrics': metrics,
         'output_dir': str(outputs_path),
-        'output_files': {
-            'model': str(outputs_path / f"{pcb_filter}_thermal_ml_model.pkl"),
-            'metrics': str(outputs_path / f"{pcb_filter}_ml_metrics.csv"),
-            'training_data': str(outputs_path / f"{pcb_filter}_ml_training_data.csv"),
-            'plot_predicted_vs_actual': plot_path,
-            'plot_residuals': residual_path,
-            'plot_type_comparison': type_comparison_path
-        }
+        'status': 'disabled - use CNN model instead'
     }
     
-    print("\n" + "="*80)
-    print(" PHASE 8 COMPLETE")
-    print("="*80)
-    print(f"Training components: {len(y_true)}")
-    print(f"Model R² Score: {metrics['R²']:.4f}")
-    print(f"Model RMSE: {metrics['RMSE']:.2f} °C")
-    print(f"Model MAE: {metrics['MAE']:.2f} °C")
-    print(f"\nOutput files saved to: {outputs_path}")
-    print("="*80)
+    # =========================================================================
+    # LEGACY CODE - DISABLED
+    # =========================================================================
+    # The code below is commented out pending replacement with CNN approach
     
-    return results
+    # print("\n" + "="*80)
+    # print("[PHASE 8] MACHINE LEARNING TRAINING")
+    # print("="*80)
+    # 
+    # # Initialize ML predictor (outputs_dir already includes ml_model if needed)
+    # predictor = phase8.ThermalMLPredictor(output_dir=str(outputs_path), verbose=True)
+    # 
+    # # Load training data
+    # predictor.load_training_data(
+    #     calibration_csv=calibration_points_file,
+    #     pcb_filter=pcb_filter
+    # )
+    # 
+    # # Calculate delta T for each component
+    # predictor.calculate_delta_t()
+    # 
+    # # Prepare feature matrix with one-hot encoded component types
+    # predictor.prepare_feature_matrix()
+    # 
+    # # Train OLS model
+    # predictor.train_model()
+    # 
+    # # Calculate performance metrics
+    # metrics = predictor.calculate_metrics()
+    
 
 
 def process_ml_validation(trained_model_path: str,
@@ -1354,17 +732,15 @@ def process_ml_validation(trained_model_path: str,
                          train_pcb: str,
                          outputs_dir: str,
                          debug: bool = False) -> Dict:
-    """
-    Phase 8b: Cross-board ML model validation.
+    """Cross-board ML model validation (Phase 8b).
     
-    Uses model trained on one board to predict temperatures on another board
-    and compares to actual measurements for validation.
+    Uses model trained on one board to predict temperatures on another board.
     
     Args:
         trained_model_path: Path to trained .pkl model file
         calibration_db_path: Path to thermal_calibration_points.csv
-        test_pcb: PCB name to validate on (e.g., "HBridge")
-        train_pcb: PCB name used for training (for plot labels)
+        test_pcb: PCB name to validate on
+        train_pcb: PCB name used for training
         outputs_dir: Base output directory
         debug: Enable verbose debug output
     
@@ -1464,6 +840,37 @@ def process_ml_validation(trained_model_path: str,
 def main():
     """Main entry point with argument parsing and configuration UI"""
     
+    # =========================================================================
+    # PRE-PROCESSING MENU: FLIR FRAME FILTERING
+    # =========================================================================
+    # Check if user wants to filter FLIR frames before main pipeline
+    # This is a one-time setup step for ML training that should be run
+    # before building the CNN dataset
+    # =========================================================================
+    
+    # Only show pre-processing menu if no command-line arguments provided
+    if len(sys.argv) == 1:
+        print("\n" + "="*80)
+        print(" RESEARCHIR POST-PROCESSOR")
+        print("="*80)
+        print("\nPRE-PROCESSING OPTIONS:")
+        print("  [F] Filter FLIR frames for ML training (one-time setup)")
+        print("  [C] Continue to main pipeline")
+        print("\nFiltering removes camera refocusing artifacts using temporal median filter.")
+        print("Required before training CNN model. Takes ~8 minutes for 2 boards.")
+        
+        choice = input("\nSelect option [F/C]: ").strip().upper()
+        
+        if choice == 'F':
+            # Run filtering and exit
+            filter_all_flir_frames()
+            print("\nFiltering complete. Exiting.")
+            print("Re-run this script to continue with main pipeline.")
+            return
+        elif choice != 'C':
+            print("Invalid choice. Exiting.")
+            return
+    
     parser = argparse.ArgumentParser(
         description='Post-process ResearchIR thermal data exports'
     )
@@ -1485,6 +892,10 @@ def main():
                        help='Enable debug output')
     parser.add_argument('--no_ui', action='store_true',
                        help='Skip interactive configuration UI')
+    
+    # Pre-processing arguments
+    parser.add_argument('--filter_flir_frames', action='store_true',
+                       help='Filter FLIR frames for ML training (pre-processing step)')
     
     # Workflow selection arguments
     parser.add_argument('--thermal_modeling', action='store_true',
@@ -1525,6 +936,14 @@ def main():
                        help='PCB name to validate trained model against (e.g., HBridge)')
     
     args = parser.parse_args()
+    
+    # Handle --filter_flir_frames flag (pre-processing mode)
+    if args.filter_flir_frames:
+        print("\n[PRE-PROCESSING] Filtering FLIR frames for ML training...")
+        boards_filtered = filter_all_flir_frames()
+        print(f"\nFiltered {boards_filtered} board(s) successfully.")
+        print("Next step: Update ML dataset builder to use filtered folders")
+        return
     
     # Handle --validate flag (validation mode)
     if args.validate:
@@ -1844,62 +1263,37 @@ def main():
                 debug=config['debug']
             )
             
-            # Phase 8: ML Training (if ML modules available)
+            # Phase 8: ML Training (NEW - U-Net CNN wrapper)
+            # Note: Currently only configured for HBridge board
             if ML_AVAILABLE:
                 print("\n>>> EXECUTING PHASE 8 (Machine Learning)")
                 
-                # Get calibration points file from Phase 6 results
-                calibration_points_file = results_6_7.get('calibration_points_file')
-                if not calibration_points_file:
-                    calibration_points_file = str(Path(config['output_dir']) / "calibration_database" / "thermal_calibration_points.csv")
-                
-                # Check if file exists
-                if Path(calibration_points_file).exists():
-                    ml_output_dir = str(Path(config['output_dir']) / 'ml_model')
-                    
-                    results_8 = process_ml_training(
-                        calibration_points_file=calibration_points_file,
-                        pcb_filter=config.get('calibration_pcb', 'Load_Shedding'),
-                        outputs_dir=ml_output_dir,
-                        debug=config['debug']
+                try:
+                    # Call new phase8_ml_training wrapper
+                    # This provides UI menu for U-Net CNN, Linear Regression, or both
+                    # HARDCODED to HBridge for now - future: support multi-board training
+                    results_8 = phase8_ml_training.run_phase8_ml_training(
+                        session_dir=Path(config['output_dir']),
+                        config=config,
+                        board_name='HBridge'  # TODO: Make configurable for multi-board ML
                     )
                     
-                    # Phase 8b: Cross-board validation (auto-validate on HBridge)
-                    print("\n>>> EXECUTING PHASE 8b (ML Cross-Board Validation)")
+                    if not results_8.get('skipped'):
+                        print("\n" + "="*80)
+                        print(" PHASE 8 COMPLETE (Machine Learning)")
+                        print("="*80)
+                        if 'unet' in results_8:
+                            print(f"✓ U-Net CNN: {results_8['unet'].get('model_file', 'N/A')}")
+                        if 'linear' in results_8:
+                            print(f"✓ Linear Regression: {results_8['linear'].get('status', 'N/A')}")
+                        print("="*80)
                     
-                    # Find trained model
-                    model_files = glob.glob(os.path.join(ml_output_dir, '*_thermal_ml_model.pkl'))
-                    if model_files:
-                        trained_model = model_files[0]
-                        
-                        try:
-                            validation_results = process_ml_validation(
-                                trained_model_path=trained_model,
-                                calibration_db_path=calibration_points_file,
-                                test_pcb='HBridge',
-                                train_pcb='Load_Shedding',
-                                outputs_dir=ml_output_dir,
-                                debug=config['debug']
-                            )
-                            
-                            print("\n" + "="*80)
-                            print(" PHASE 8b COMPLETE (Cross-Board Validation)")
-                            print("="*80)
-                            print(f"Test board: HBridge")
-                            print(f"Validation R²: {validation_results['metrics']['R²']:.4f}")
-                            print(f"Validation RMSE: {validation_results['metrics']['RMSE']:.2f} °C")
-                            print(f"Validation MAE: {validation_results['metrics']['MAE']:.2f} °C")
-                            print("="*80)
-                        except Exception as e:
-                            print(f"Warning: Cross-board validation failed: {e}")
-                            if config['debug']:
-                                import traceback
-                                traceback.print_exc()
-                    else:
-                        print("Warning: No trained model found for validation")
-                else:
-                    print(f"  Warning: Calibration points file not found, skipping Phase 8")
-                    print(f"  Expected: {calibration_points_file}")
+                except Exception as e:
+                    print(f"\n⚠️ Warning: Phase 8 (ML Training) encountered an error: {e}")
+                    if config.get('debug'):
+                        import traceback
+                        traceback.print_exc()
+                    print("Continuing with pipeline...")
             else:
                 print("\n>>> SKIPPING PHASE 8 (Machine Learning modules not available)")
             

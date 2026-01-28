@@ -969,3 +969,302 @@ def create_component_detail_plots(flir_data: Dict, air_data: Dict, sand_data: Di
     print(f"  Created {len(output_files)} component detail plots in {details_dir}")
     
     return output_files
+
+
+# ==============================================================================
+# FLIR FRAME FILTERING VERIFICATION (FOR ML TRAINING)
+# ==============================================================================
+
+def load_flir_frame_csv(csv_file):
+    """
+    Load a single FLIR CSV frame.
+    
+    Args:
+        csv_file: Path to FLIR CSV file
+        
+    Returns:
+        numpy array of temperature data (480x640 typical)
+    """
+    import csv
+    
+    data = []
+    with open(csv_file, 'r') as f:
+        reader = csv.reader(f)
+        for row in reader:
+            # Skip header rows and empty rows
+            if not row or len(row) == 0:
+                continue
+            # Skip rows that start with non-numeric data (headers)
+            try:
+                float(row[0])
+                data.append([float(val) for val in row])
+            except (ValueError, IndexError):
+                continue  # Skip header/metadata rows
+    return np.array(data)
+
+
+def plot_flir_frame_comparison(raw_folder, filtered_folder, frame_idx=150, 
+                               output_dir='outputs'):
+    """
+    Create visual comparison plot of raw vs filtered FLIR frame.
+    
+    This is the beautiful 2x2 subplot showing:
+    - Top left: Raw frame
+    - Top right: Filtered frame
+    - Bottom left: Absolute difference map (THE BEST PART!)
+    - Bottom right: Temperature distribution histogram
+    
+    Args:
+        raw_folder: Path to raw FLIR frames folder
+        filtered_folder: Path to filtered FLIR frames folder
+        frame_idx: Frame index to visualize (default: 150, middle of sequence)
+        output_dir: Directory to save plot
+        
+    Returns:
+        Path to saved plot file
+    """
+    from pathlib import Path
+    
+    raw_folder = Path(raw_folder)
+    filtered_folder = Path(filtered_folder)
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Get frame files
+    raw_frames = sorted(raw_folder.glob("*.csv"))
+    filtered_frames = sorted(filtered_folder.glob("*.csv"))
+    
+    if len(raw_frames) == 0 or len(filtered_frames) == 0:
+        print(f"ERROR: No frames found in {raw_folder} or {filtered_folder}")
+        return None
+    
+    # Adjust frame_idx if out of range
+    if frame_idx >= len(raw_frames):
+        frame_idx = len(raw_frames) // 2
+        print(f"Frame index adjusted to {frame_idx} (middle of sequence)")
+    
+    # Load frames
+    raw_data = load_flir_frame_csv(raw_frames[frame_idx])
+    filtered_data = load_flir_frame_csv(filtered_frames[frame_idx])
+    
+    # Set up IEEE-style plotting
+    viz.setup_ieee_plot_style()
+    
+    # Create 2x2 comparison plot
+    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+    
+    # Top left: Raw frame
+    im1 = axes[0, 0].imshow(raw_data, cmap='hot', aspect='auto', 
+                            interpolation='nearest')
+    axes[0, 0].set_title(f'Raw FLIR Frame {frame_idx}', 
+                         fontsize=14, fontweight='bold')
+    axes[0, 0].set_xlabel('Column (pixels)', fontsize=11)
+    axes[0, 0].set_ylabel('Row (pixels)', fontsize=11)
+    cbar1 = plt.colorbar(im1, ax=axes[0, 0], fraction=0.046, pad=0.04)
+    cbar1.set_label('Temperature (°C)', fontsize=11)
+    
+    # Add statistics text
+    raw_stats = (f'Min: {np.min(raw_data):.1f}°C\\n'
+                f'Max: {np.max(raw_data):.1f}°C\\n'
+                f'Mean: {np.mean(raw_data):.1f}°C\\n'
+                f'Std: {np.std(raw_data):.2f}°C')
+    axes[0, 0].text(0.02, 0.98, raw_stats, transform=axes[0, 0].transAxes,
+                   fontsize=9, verticalalignment='top',
+                   bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
+    
+    # Top right: Filtered frame
+    im2 = axes[0, 1].imshow(filtered_data, cmap='hot', aspect='auto',
+                           interpolation='nearest')
+    axes[0, 1].set_title(f'Filtered FLIR Frame {frame_idx}', 
+                        fontsize=14, fontweight='bold')
+    axes[0, 1].set_xlabel('Column (pixels)', fontsize=11)
+    axes[0, 1].set_ylabel('Row (pixels)', fontsize=11)
+    cbar2 = plt.colorbar(im2, ax=axes[0, 1], fraction=0.046, pad=0.04)
+    cbar2.set_label('Temperature (°C)', fontsize=11)
+    
+    # Add statistics text
+    filt_stats = (f'Min: {np.min(filtered_data):.1f}°C\\n'
+                 f'Max: {np.max(filtered_data):.1f}°C\\n'
+                 f'Mean: {np.mean(filtered_data):.1f}°C\\n'
+                 f'Std: {np.std(filtered_data):.2f}°C')
+    axes[0, 1].text(0.02, 0.98, filt_stats, transform=axes[0, 1].transAxes,
+                   fontsize=9, verticalalignment='top',
+                   bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
+    
+    # Bottom left: Absolute difference map (THE BEAUTIFUL PART!)
+    diff = np.abs(raw_data - filtered_data)
+    im3 = axes[1, 0].imshow(diff, cmap='viridis', aspect='auto',
+                           interpolation='nearest')
+    axes[1, 0].set_title(f'Absolute Difference (Raw - Filtered)', 
+                        fontsize=14, fontweight='bold')
+    axes[1, 0].set_xlabel('Column (pixels)', fontsize=11)
+    axes[1, 0].set_ylabel('Row (pixels)', fontsize=11)
+    cbar3 = plt.colorbar(im3, ax=axes[1, 0], fraction=0.046, pad=0.04)
+    cbar3.set_label('|Difference| (°C)', fontsize=11)
+    
+    # Add difference statistics
+    diff_stats = (f'Mean: {np.mean(diff):.2f}°C\\n'
+                 f'Max: {np.max(diff):.2f}°C\\n'
+                 f'Median: {np.median(diff):.2f}°C\\n'
+                 f'95th %ile: {np.percentile(diff, 95):.2f}°C')
+    axes[1, 0].text(0.02, 0.98, diff_stats, transform=axes[1, 0].transAxes,
+                   fontsize=9, verticalalignment='top',
+                   bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
+    
+    # Bottom right: Temperature distribution histogram
+    axes[1, 1].hist(raw_data.flatten(), bins=60, alpha=0.6, label='Raw', 
+                   color='red', edgecolor='darkred', linewidth=0.5)
+    axes[1, 1].hist(filtered_data.flatten(), bins=60, alpha=0.6, label='Filtered',
+                   color='blue', edgecolor='darkblue', linewidth=0.5)
+    axes[1, 1].set_title('Temperature Distribution', fontsize=14, fontweight='bold')
+    axes[1, 1].set_xlabel('Temperature (°C)', fontsize=11)
+    axes[1, 1].set_ylabel('Pixel Count', fontsize=11)
+    axes[1, 1].legend(loc='upper right', fontsize=10)
+    axes[1, 1].grid(True, alpha=0.3, linestyle='--')
+    
+    # Add KL divergence or similarity metric
+    overlap_pct = 100 * np.sum(np.minimum(
+        np.histogram(raw_data.flatten(), bins=60)[0],
+        np.histogram(filtered_data.flatten(), bins=60)[0]
+    )) / raw_data.size
+    axes[1, 1].text(0.98, 0.98, f'Distribution overlap: {overlap_pct:.1f}%',
+                   transform=axes[1, 1].transAxes, fontsize=9,
+                   verticalalignment='top', horizontalalignment='right',
+                   bbox=dict(boxstyle='round', facecolor='yellow', alpha=0.7))
+    
+    plt.tight_layout()
+    
+    # Save plot
+    output_file = output_dir / 'flir_filtering_verification.png'
+    plt.savefig(output_file, dpi=150, bbox_inches='tight')
+    print(f"✓ Saved FLIR filtering comparison: {output_file}")
+    plt.close()
+    
+    return str(output_file)
+
+
+def verify_flir_filtering_quality(raw_folder, filtered_folder, num_samples=20,
+                                  output_dir='outputs', verbose=True):
+    """
+    Comprehensive verification of FLIR frame filtering quality.
+    
+    Analyzes multiple frames to check:
+    - Temperature range preservation
+    - Noise reduction effectiveness
+    - Over-smoothing detection
+    - Pixel-wise difference metrics
+    
+    Args:
+        raw_folder: Path to raw FLIR frames
+        filtered_folder: Path to filtered FLIR frames
+        num_samples: Number of frames to sample (default: 20)
+        output_dir: Directory to save verification plot
+        verbose: Print detailed statistics
+        
+    Returns:
+        Dictionary with validation results and metrics
+    """
+    from pathlib import Path
+    
+    raw_folder = Path(raw_folder)
+    filtered_folder = Path(filtered_folder)
+    
+    if verbose:
+        print("="*80)
+        print("FLIR FRAME FILTERING VERIFICATION")
+        print("="*80)
+        print(f"Raw folder:      {raw_folder}")
+        print(f"Filtered folder: {filtered_folder}")
+    
+    # Get frame lists
+    raw_frames = sorted(raw_folder.glob("*.csv"))
+    filtered_frames = sorted(filtered_folder.glob("*.csv"))
+    
+    if verbose:
+        print(f"\nRaw frames:      {len(raw_frames)}")
+        print(f"Filtered frames: {len(filtered_frames)}")
+    
+    if len(raw_frames) == 0 or len(filtered_frames) == 0:
+        print("ERROR: No frames found!")
+        return {'valid': False, 'error': 'No frames found'}
+    
+    if len(raw_frames) != len(filtered_frames):
+        print("WARNING: Frame count mismatch!")
+    
+    # Sample frames evenly
+    indices = np.linspace(0, len(raw_frames)-1, num_samples, dtype=int)
+    
+    metrics = {
+        'temp_range_raw': [],
+        'temp_range_filtered': [],
+        'std_raw': [],
+        'std_filtered': [],
+        'mean_diff': [],
+        'max_diff': []
+    }
+    
+    if verbose:
+        print(f"\nAnalyzing {num_samples} sampled frames...")
+        print("-"*80)
+    
+    for idx in indices:
+        raw_data = load_flir_frame_csv(raw_frames[idx])
+        filtered_data = load_flir_frame_csv(filtered_frames[idx])
+        
+        # Calculate metrics
+        raw_min, raw_max = np.min(raw_data), np.max(raw_data)
+        filt_min, filt_max = np.min(filtered_data), np.max(filtered_data)
+        
+        metrics['temp_range_raw'].append(raw_max - raw_min)
+        metrics['temp_range_filtered'].append(filt_max - filt_min)
+        metrics['std_raw'].append(np.std(raw_data))
+        metrics['std_filtered'].append(np.std(filtered_data))
+        
+        diff = np.abs(raw_data - filtered_data)
+        metrics['mean_diff'].append(np.mean(diff))
+        metrics['max_diff'].append(np.max(diff))
+    
+    # Compute summary statistics
+    avg_raw_range = np.mean(metrics['temp_range_raw'])
+    avg_filt_range = np.mean(metrics['temp_range_filtered'])
+    range_reduction = 100 * (1 - avg_filt_range / avg_raw_range)
+    
+    avg_raw_std = np.mean(metrics['std_raw'])
+    avg_filt_std = np.mean(metrics['std_filtered'])
+    noise_reduction = 100 * (1 - avg_filt_std / avg_raw_std)
+    
+    avg_mean_diff = np.mean(metrics['mean_diff'])
+    avg_max_diff = np.mean(metrics['max_diff'])
+    
+    if verbose:
+        print("\n" + "="*80)
+        print("SUMMARY STATISTICS")
+        print("="*80)
+        print(f"\nTemperature Range:")
+        print(f"  Raw:      {avg_raw_range:.2f}°C")
+        print(f"  Filtered: {avg_filt_range:.2f}°C")
+        print(f"  Change:   {range_reduction:+.1f}%")
+        
+        print(f"\nNoise (Spatial Std Dev):")
+        print(f"  Raw:      {avg_raw_std:.2f}°C")
+        print(f"  Filtered: {avg_filt_std:.2f}°C")
+        print(f"  Reduction: {noise_reduction:.1f}%")
+        
+        print(f"\nPixel-wise Differences:")
+        print(f"  Mean: {avg_mean_diff:.2f}°C")
+        print(f"  Max:  {avg_max_diff:.2f}°C")
+    
+    # Generate visualization
+    plot_file = plot_flir_frame_comparison(raw_folder, filtered_folder, 
+                                          frame_idx=150, output_dir=output_dir)
+    
+    # Return metrics
+    return {
+        'valid': True,
+        'range_reduction_pct': range_reduction,
+        'noise_reduction_pct': noise_reduction,
+        'mean_diff_degC': avg_mean_diff,
+        'max_diff_degC': avg_max_diff,
+        'plot_file': plot_file,
+        'metrics': metrics
+    }

@@ -40,6 +40,8 @@ ENV/
 # Outputs (generated results)
 outputs/*
 !outputs/.gitkeep
+!outputs/roi_pixel_maps/
+!outputs/roi_pixel_maps/*.csv
 
 # Temporary files
 *.tmp
@@ -49,6 +51,10 @@ MIGRATION_REPORT_*.txt
 
 # Large data files (keep examples only)
 *.csv
+# But KEEP these essential config CSVs:
+!*_pcb_components_enhanced.csv
+!Pick_Place_*.csv
+!outputs/roi_pixel_maps/*.csv
 !component_type_patterns.json
 !loadshedding_thermistor_mapping.json
 !*_multi_test_config.json
@@ -90,11 +96,50 @@ docs/_templates/
 htmlcov/
 .tox/
 
-# Machine Learning Models (large binary files)
+# Machine Learning Models (large binary files - 8GB each)
 *.pkl
-*.h5
-*.hdf5
+*.keras
 !*_example.pkl
+
+# ML Datasets and Results (regenerated, large)
+ml_model/cnn_thermal_modeling/datasets/*.h5
+ml_model/cnn_thermal_modeling/datasets/*.hdf5
+ml_model/cnn_thermal_modeling/results/
+ml_model_venv/
+
+# Keep training configuration and small metadata
+!ml_model/cnn_thermal_modeling/**/*.md
+!ml_model/cnn_thermal_modeling/**/*.txt
+!ml_model/cnn_thermal_modeling/**/*.json
+
+# Image/Video outputs (large)
+*.gif
+*.mp4
+*.avi
+*.png
+!docs/**/*.png
+
+# Large FLIR data directories (users download separately - 3GB total)
+inputs/ResearchIR_Outputs_HBridge_15s/
+inputs/ResearchIR_Outputs_HBridge_15s_filtered/
+inputs/ResearchIR_Outputs_Load_Shedding/
+inputs/ResearchIR_Outputs_Load_Shedding_filtered/
+
+# Large thermistor test data directories (110MB total)
+inputs/Test_Air_HBridge_Sensing/
+inputs/Test_Sand_HBridge_Sensing/
+inputs/Test_Air_Load_Shedding/
+inputs/Test_Sand_Load_Shedding/
+
+# Large thermistor CSV files (>1MB)
+inputs/*_FLIR_Camera_Results_*.csv
+inputs/*_usb_temp_DAQami.csv
+
+# Essential config files are INCLUDED (committed to Git):
+# - inputs/*_pcb_components_enhanced.csv (~50KB)
+# - inputs/Pick_Place_*.csv (~27KB)
+# - *.json config files (~30KB)
+# - outputs/roi_pixel_maps/ (~1.6MB)
 
 # Backup folders - exclude large files
 backup/**/*.zip
@@ -107,3 +152,4 @@ backup/pre_gitlab_migration_*/
 
 # Keep important backups documented in GITLAB_CLEANUP_SUMMARY.md
 # but can be removed after verified migration
+inputs.zip

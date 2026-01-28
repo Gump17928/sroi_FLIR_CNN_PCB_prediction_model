@@ -1,936 +1,679 @@
 """
 ===============================================================================
-PHASE 8: MACHINE LEARNING THERMAL PREDICTION
+PHASE 8: MACHINE LEARNING TRAINING
 ===============================================================================
-Train linear regression model to predict sand embedded temperatures from
-FLIR air measurements using Ordinary Least Squares (OLS) regression.
+Orchestrates thermal prediction ML model training using U-Net CNN.
 
-Model Structure:
-    ΔT_sand = β₀ + β₁·ΔT_flir_air + β₂·is_IC + β₃·is_Resistor + ... + ε
+This module provides:
+- U-Net CNN wrapper (calls ml_model/cnn_thermal_modeling/)
+- Model evaluation interface
+- User interface for training and evaluation
 
-Where:
-    - ΔT_sand: Sand thermistor temperature rise (max - min)
-    - ΔT_flir_air: FLIR air measurement temperature rise (max - min)
-    - is_IC, is_Resistor, etc.: One-hot encoded component types
-
-Features:
-    - FLIR air delta T (continuous)
-    - Component type (categorical, one-hot encoded)
-
-Target:
-    - Sand thermistor delta T (continuous)
-
-Workflow:
-    1. Load thermal_calibration_points.csv (from Phase 6)
-    2. Filter to specific PCB (e.g., Load_Shedding)
-    3. Calculate delta T for each component (max - min)
-    4. One-hot encode component types
-    5. Train OLS linear regression model
-    6. Export trained model (pickle)
-    7. Export metrics (R², RMSE, MAE, coefficients)
-    8. Generate predictions for visualization
-
-Usage:
-    from phase8_ml_training import ThermalMLPredictor
-    
-    predictor = ThermalMLPredictor(output_dir="outputs/phase8")
-    predictor.load_training_data("thermal_calibration_points.csv", pcb_filter="Load_Shedding")
-    predictor.train_model()
-    predictor.export_model()
-    predictor.export_metrics()
-
-Created: January 7, 2026
+Created: January 15, 2026
+Updated: January 28, 2026 - Removed legacy linear regression
 ===============================================================================
 """
 
-import numpy as np
-import pandas as pd
-import pickle
+import sys
 from pathlib import Path
-from typing import Dict, List, Tuple, Optional
+import shutil
 import json
-from sklearn.linear_model import LinearRegression
-from sklearn.metrics import r2_score, mean_squared_error, mean_absolute_error
+from datetime import datetime
+from typing import Dict, Optional
 
 
-class ThermalMLPredictor:
+def run_phase8_ml_training(session_dir: Path, config: Dict, 
+                          board_name: str = "HBridge") -> Dict:
     """
-    Machine learning predictor for embedded thermal behavior using OLS regression.
+    Main entry point for Phase 8 ML training.
     
-    Predicts sand embedded temperatures from FLIR air measurements and component type.
-    Uses Ordinary Least Squares linear regression with one-hot encoded component types.
-    """
-    
-    # Standard component types for one-hot encoding
-    COMPONENT_TYPES = ['IC', 'Resistor', 'PowerSupply', 'LED', 'Connector', 'Capacitor', 'Inductor', 'Diode']
-    
-    def __init__(self, output_dir: str = "outputs/phase8", verbose: bool = True):
-        """
-        Initialize ML predictor.
-        
-        Args:
-            output_dir: Directory for output files (model, metrics, plots)
-            verbose: Enable verbose output
-        """
-        self.output_dir = Path(output_dir)
-        self.output_dir.mkdir(parents=True, exist_ok=True)
-        self.verbose = verbose
-        
-        # Training data
-        self.df_raw = None
-        self.df_features = None
-        self.X = None  # Feature matrix
-        self.y = None  # Target vector
-        self.component_names = None
-        self.component_types = None
-        
-        # Trained model (sklearn LinearRegression)
-        self.model = None
-        
-        # Performance metrics
-        self.metrics = {}
-        
-    def load_training_data(self, calibration_csv: str, pcb_filter: str = None):
-        """
-        Load and prepare training data from calibration database.
-        
-        Loads thermal_calibration_points.csv from Phase 6, filters to specific PCB,
-        and extracts FLIR air and sand thermistor measurements for delta T calculation.
-        
-        Args:
-            calibration_csv: Path to thermal_calibration_points.csv
-            pcb_filter: Filter to specific PCB name (e.g., "Load_Shedding")
-        """
-        if self.verbose:
-            print(f"\n[PHASE 8 - DATA LOADING]")
-            print(f"  Loading calibration data: {calibration_csv}")
-        
-        # Load calibration database
-        self.df_raw = pd.read_csv(calibration_csv)
-        
-        if self.verbose:
-            print(f"  Total calibration points: {len(self.df_raw)}")
-        
-        # Filter to specific PCB if requested
-        if pcb_filter:
-            # Try matching against multiple columns (flexible matching)
-            # Extract key parts from filter (e.g., "Load_Shedding" -> "Load")
-            filter_parts = pcb_filter.replace('_', ' ').split()
-            
-            if 'board_name' in self.df_raw.columns:
-                # Match against board_name (e.g., "Load" matches "Load_Shedding")
-                mask = self.df_raw['board_name'].apply(
-                    lambda x: any(part.lower() in str(x).lower() for part in filter_parts) if pd.notna(x) else False
-                )
-            elif 'pcb' in self.df_raw.columns:
-                # Fallback to 'pcb' column
-                mask = self.df_raw['pcb'].str.contains(pcb_filter, case=False, na=False)
-            else:
-                raise ValueError("Cannot find 'board_name' or 'pcb' column for filtering")
-            
-            self.df_raw = self.df_raw[mask].copy()
-            if self.verbose:
-                print(f"  Filtered to {pcb_filter}: {len(self.df_raw)} points")
-        
-        # Check required columns exist (using actual column names from calibration database)
-        required_cols = ['component_name', 'component_type', 'flir_ss', 'air_ss', 'sand_ss']
-        missing_cols = [col for col in required_cols if col not in self.df_raw.columns]
-        if missing_cols:
-            raise ValueError(f"Missing required columns in calibration data: {missing_cols}")
-        
-        # Filter to only components with both FLIR and sand data
-        # Remove rows where sand_ss is NaN
-        initial_count = len(self.df_raw)
-        self.df_raw = self.df_raw.dropna(subset=['sand_ss']).copy()
-        removed_count = initial_count - len(self.df_raw)
-        
-        if self.verbose and removed_count > 0:
-            print(f"  Removed {removed_count} points without sand data")
-            print(f"  Final dataset: {len(self.df_raw)} points")
-        
-        if len(self.df_raw) == 0:
-            raise ValueError("No valid training data after filtering (need both FLIR and sand measurements)")
-    
-    def calculate_delta_t(self):
-        """
-        Calculate delta T (temperature rise above ambient) for each measurement.
-        
-        For each test session, finds the minimum temperature as ambient reference,
-        then calculates temperature rise for each component.
-        Creates feature dataset with delta_t_flir_air, delta_t_sand, component_type.
-        """
-        if self.verbose:
-            print(f"\n[PHASE 8 - DELTA T CALCULATION]")
-        
-        # Calculate delta T for each row (measurement) as temperature rise above initial baseline
-        component_deltas = []
-        
-        # Check if initial temperature columns exist
-        has_initial_temps = 'air_initial' in self.df_raw.columns and 'sand_initial' in self.df_raw.columns
-        
-        if not has_initial_temps:
-            print("\nWarning: air_initial and sand_initial columns not found in calibration database.")
-            print("Using legacy method (steady-state minimum as ambient).")
-            print("For accurate results, regenerate calibration database with Phase 6.\n")
-        
-        # Group by test session to calculate delta T
-        for test_session, test_group in self.df_raw.groupby('test_session'):
-            for _, row in test_group.iterrows():
-                comp_name = row['component_name']
-                comp_type = row['component_type']
-                
-                if has_initial_temps:
-                    # NEW METHOD: Use initial temperatures as ambient baseline
-                    # delta T = steady_state - initial (temperature rise during test)
-                    delta_t_air = row['air_ss'] - row['air_initial']
-                    delta_t_sand = row['sand_ss'] - row['sand_initial']
-                    # Note: FLIR doesn't have initial temp, use air as proxy
-                    delta_t_flir_air = delta_t_air
-                else:
-                    # LEGACY METHOD: Use minimum steady-state as ambient (INCORRECT)
-                    ambient_flir = test_group['flir_ss'].min()
-                    ambient_air = test_group['air_ss'].min()
-                    ambient_sand = test_group['sand_ss'].min()
-                    delta_t_flir_air = row['air_ss'] - ambient_air
-                    delta_t_sand = row['sand_ss'] - ambient_sand
-                
-                component_deltas.append({
-                    'component': comp_name,
-                    'component_type': comp_type,
-                    'delta_t_flir_air': delta_t_flir_air,
-                    'delta_t_sand': delta_t_sand,
-                    'n_measurements': 1,
-                    'test_session': test_session
-                })
-        
-        self.df_features = pd.DataFrame(component_deltas)
-        
-        if self.verbose:
-            print(f"  Calculated delta T for {len(self.df_features)} components")
-            print(f"  Component types: {self.df_features['component_type'].unique()}")
-            print(f"\n  Delta T Statistics:")
-            print(f"    FLIR Air:  {self.df_features['delta_t_flir_air'].mean():.1f} ± {self.df_features['delta_t_flir_air'].std():.1f} °C")
-            print(f"    Sand:      {self.df_features['delta_t_sand'].mean():.1f} ± {self.df_features['delta_t_sand'].std():.1f} °C")
-    
-    def prepare_feature_matrix(self):
-        """
-        Prepare feature matrix X and target vector y with one-hot encoded component types.
-        
-        Creates feature matrix with:
-            - Column 0: delta_t_flir_air (continuous)
-            - Columns 1-N: One-hot encoded component types
-        
-        Target vector y: delta_t_sand (continuous)
-        """
-        if self.verbose:
-            print(f"\n[PHASE 8 - FEATURE ENGINEERING]")
-        
-        # Extract component names and types
-        self.component_names = self.df_features['component'].values
-        self.component_types = self.df_features['component_type'].values
-        
-        # Create one-hot encoding for component types
-        n_samples = len(self.df_features)
-        n_types = len(self.COMPONENT_TYPES)
-        
-        # Initialize feature matrix: [delta_t_flir_air, type_0, type_1, ..., type_N]
-        X_list = []
-        feature_names = ['delta_t_flir_air']
-        
-        # Add FLIR delta T as first feature
-        X_list.append(self.df_features['delta_t_flir_air'].values.reshape(-1, 1))
-        
-        # Add one-hot encoded component types
-        for comp_type in self.COMPONENT_TYPES:
-            is_type = (self.component_types == comp_type).astype(float).reshape(-1, 1)
-            X_list.append(is_type)
-            feature_names.append(f'type_{comp_type}')
-        
-        # Combine into feature matrix
-        self.X = np.hstack(X_list)
-        self.feature_names = feature_names
-        
-        # Extract target vector
-        self.y = self.df_features['delta_t_sand'].values
-        
-        if self.verbose:
-            print(f"  Feature matrix shape: {self.X.shape}")
-            print(f"  Features: {self.feature_names}")
-            print(f"  Target vector shape: {self.y.shape}")
-            print(f"\n  Component Type Distribution:")
-            for comp_type in self.COMPONENT_TYPES:
-                count = np.sum(self.component_types == comp_type)
-                if count > 0:
-                    print(f"    {comp_type}: {count} components")
-    
-    def train_model(self):
-        """
-        Train scikit-learn Linear Regression model using Ordinary Least Squares.
-        
-        Uses sklearn.linear_model.LinearRegression which implements OLS regression.
-        
-        Model equation:
-            y = X β + ε
-            
-        Where:
-            - y: delta_t_sand (target)
-            - X: [delta_t_flir_air, type_IC, type_Resistor, ...] (features)
-            - β: model coefficients
-            - ε: residuals
-        """
-        if self.verbose:
-            print(f"\n[PHASE 8 - MODEL TRAINING]")
-            print(f"  Training sklearn Linear Regression (OLS)...")
-        
-        # Initialize sklearn linear regression model
-        self.model = LinearRegression()
-        
-        # Fit model: model.fit(X, y)
-        self.model.fit(self.X, self.y)
-        
-        if self.verbose:
-            print(f"  Model trained successfully")
-            print(f"\n  Model Equation:")
-            print(f"    ΔT_sand = {self.model.intercept_:.3f}", end='')
-            for i, (coef, feat_name) in enumerate(zip(self.model.coef_, self.feature_names)):
-                sign = '+' if coef >= 0 else ''
-                print(f" {sign}{coef:.3f}·{feat_name}", end='')
-            print()
-    
-    def calculate_metrics(self) -> Dict:
-        """
-        Calculate model performance metrics using sklearn.
-        
-        Computes:
-            - R²: Coefficient of determination
-            - RMSE: Root mean squared error
-            - MAE: Mean absolute error
-        
-        Returns:
-            Dictionary with metric names and values
-        """
-        # Generate predictions
-        y_pred = self.model.predict(self.X)
-        
-        # Calculate metrics using sklearn
-        r_squared = r2_score(self.y, y_pred)
-        mse = mean_squared_error(self.y, y_pred)
-        rmse = np.sqrt(mse)
-        mae = mean_absolute_error(self.y, y_pred)
-        
-        self.metrics = {
-            'R²': r_squared,
-            'RMSE': rmse,
-            'MAE': mae,
-            'n_samples': len(self.y),
-            'n_features': len(self.feature_names)
-        }
-        
-        if self.verbose:
-            print(f"\n[PHASE 8 - MODEL PERFORMANCE]")
-            print(f"  R² Score:     {r_squared:.4f}")
-            print(f"  RMSE:         {rmse:.2f} °C")
-            print(f"  MAE:          {mae:.2f} °C")
-            print(f"  Samples:      {len(self.y)}")
-            print(f"  Features:     {len(self.feature_names)}")
-        
-        return self.metrics
-    
-    def load_trained_model(self, model_path: str):
-        """
-        Load previously trained model from pickle file.
-        
-        Args:
-            model_path: Path to .pkl model file
-        """
-        if self.verbose:
-            print(f"\n[PHASE 8 - MODEL LOADING]")
-            print(f"  Loading trained model: {model_path}")
-        
-        with open(model_path, 'rb') as f:
-            model_data = pickle.load(f)
-        
-        self.model = model_data['model']
-        self.feature_names = model_data['feature_names']
-        self.COMPONENT_TYPES = model_data['component_types']
-        self.metrics = model_data.get('metrics', {})
-        
-        if self.verbose:
-            print(f"  Model loaded successfully")
-            print(f"  Features: {len(self.feature_names)}")
-            print(f"  Component types: {len(self.COMPONENT_TYPES)}")
-    
-    def predict(self, X: np.ndarray) -> np.ndarray:
-        """
-        Make predictions using trained sklearn model.
-        
-        Args:
-            X: Feature matrix [n_samples, n_features]
-        
-        Returns:
-            Predictions [n_samples]
-        """
-        if self.model is None:
-            raise ValueError("Model not trained yet. Call train_model() first.")
-        
-        return self.model.predict(X)
-    
-    def predict_sand_delta_t(self, flir_delta_t: float, component_type: str) -> float:
-        """
-        Predict sand delta T for a single component.
-        
-        Convenience function for making predictions on new data.
-        
-        Args:
-            flir_delta_t: FLIR air temperature rise (°C)
-            component_type: Component type (e.g., 'IC', 'Resistor')
-        
-        Returns:
-            Predicted sand delta T (°C)
-        """
-        # Build feature vector
-        features = [flir_delta_t]
-        for comp_type in self.COMPONENT_TYPES:
-            features.append(1.0 if comp_type == component_type else 0.0)
-        
-        X_single = np.array([features])
-        return self.predict(X_single)[0]
-    
-    def export_model(self, filename: str = None):
-        """
-        Export trained sklearn model to pickle file.
-        
-        Saves complete sklearn LinearRegression model object including
-        coefficients, intercept, and feature names for later use.
-        
-        Args:
-            filename: Output filename (default: auto-generated from PCB name)
-        """
-        if filename is None:
-            # Auto-generate filename from PCB name if available
-            if 'pcb' in self.df_raw.columns:
-                pcb_name = self.df_raw['pcb'].iloc[0]
-                filename = f"{pcb_name}_thermal_ml_model.pkl"
-            else:
-                filename = "thermal_ml_model.pkl"
-        
-        model_path = self.output_dir / filename
-        
-        # Package model data (save sklearn model + metadata)
-        model_data = {
-            'model': self.model,  # sklearn LinearRegression object
-            'feature_names': self.feature_names,
-            'component_types': self.COMPONENT_TYPES,
-            'metrics': self.metrics
-        }
-        
-        # Save to pickle
-        with open(model_path, 'wb') as f:
-            pickle.dump(model_data, f)
-        
-        if self.verbose:
-            print(f"\n[PHASE 8 - MODEL EXPORT]")
-            print(f"  Saved model: {model_path}")
-    
-    def export_metrics(self, filename: str = None):
-        """
-        Export model metrics to CSV file.
-        
-        Creates CSV with:
-            - R², RMSE, MAE
-            - Model intercept
-            - All feature coefficients
-        
-        Args:
-            filename: Output filename (default: auto-generated from PCB name)
-        """
-        if filename is None:
-            # Auto-generate filename from PCB name if available
-            if 'pcb' in self.df_raw.columns:
-                pcb_name = self.df_raw['pcb'].iloc[0]
-                filename = f"{pcb_name}_ml_metrics.csv"
-            else:
-                filename = "ml_metrics.csv"
-        
-        metrics_path = self.output_dir / filename
-        
-        # Build metrics dataframe
-        rows = []
-        
-        # Add performance metrics
-        rows.append({'Metric': 'R²', 'Value': f"{self.metrics['R²']:.6f}"})
-        rows.append({'Metric': 'RMSE', 'Value': f"{self.metrics['RMSE']:.4f}"})
-        rows.append({'Metric': 'MAE', 'Value': f"{self.metrics['MAE']:.4f}"})
-        rows.append({'Metric': 'n_samples', 'Value': str(self.metrics['n_samples'])})
-        rows.append({'Metric': 'n_features', 'Value': str(self.metrics['n_features'])})
-        
-        # Add model coefficients
-        rows.append({'Metric': 'Intercept', 'Value': f"{self.model.intercept_:.6f}"})
-        for feat_name, coef in zip(self.feature_names, self.model.coef_):
-            rows.append({'Metric': f'Coef_{feat_name}', 'Value': f"{coef:.6f}"})
-        
-        df_metrics = pd.DataFrame(rows)
-        df_metrics.to_csv(metrics_path, index=False)
-        
-        if self.verbose:
-            print(f"  Saved metrics: {metrics_path}")
-    
-    def export_training_data(self, filename: str = None):
-        """
-        Export feature dataset to CSV for debugging/inspection.
-        
-        Saves component names, types, delta T values, and predictions.
-        
-        Args:
-            filename: Output filename (default: auto-generated from PCB name)
-        """
-        if filename is None:
-            # Auto-generate filename from PCB name if available
-            if 'pcb' in self.df_raw.columns:
-                pcb_name = self.df_raw['pcb'].iloc[0]
-                filename = f"{pcb_name}_ml_training_data.csv"
-            else:
-                filename = "ml_training_data.csv"
-        
-        data_path = self.output_dir / filename
-        
-        # Add predictions to feature dataframe
-        self.df_features['predicted_sand_delta_t'] = self.predict(self.X)
-        self.df_features['residual'] = self.y - self.df_features['predicted_sand_delta_t']
-        
-        # Export
-        self.df_features.to_csv(data_path, index=False)
-        
-        if self.verbose:
-            print(f"  Saved training data: {data_path}")
-    
-    def get_predictions_for_visualization(self) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-        """
-        Get predictions and actual values for visualization.
-        
-        Returns:
-            Tuple of (y_true, y_pred, component_types)
-        """
-        y_pred = self.predict(self.X)
-        return self.y, y_pred, self.component_types
-    
-    def predict_on_board(self, calibration_file: str, target_pcb: str) -> pd.DataFrame:
-        """
-        Predict sand temps for a different board using trained model.
-        
-        Args:
-            calibration_file: Path to thermal_calibration_points.csv
-            target_pcb: PCB name to predict (e.g., "HBridge")
-        
-        Returns:
-            DataFrame with predictions, actuals, and residuals
-        """
-        if self.model is None:
-            raise ValueError("No trained model loaded. Call load_trained_model() or train_model() first.")
-        
-        if self.verbose:
-            print(f"\n[PHASE 8 - CROSS-BOARD PREDICTION]")
-            print(f"  Target board: {target_pcb}")
-        
-        # Load target board calibration data (reuse existing method)
-        original_verbose = self.verbose
-        self.verbose = False  # Suppress loading messages
-        
-        # Save current training data
-        train_df_raw = self.df_raw
-        
-        # Load test board data
-        self.load_training_data(calibration_file, pcb_filter=target_pcb)
-        test_df_raw = self.df_raw
-        
-        # Calculate delta T for test board
-        self.calculate_delta_t()
-        test_df_features = self.df_features
-        
-        # Prepare feature matrix for test board
-        self.prepare_feature_matrix()
-        X_test = self.X
-        y_test = self.y
-        test_component_names = self.component_names
-        test_component_types = self.component_types
-        
-        # Restore training data
-        self.df_raw = train_df_raw
-        self.verbose = original_verbose
-        
-        if self.verbose:
-            print(f"  Test samples: {len(X_test)}")
-        
-        # Make predictions
-        y_pred = self.model.predict(X_test)
-        
-        # Build results dataframe
-        results = pd.DataFrame({
-            'component': test_component_names,
-            'component_type': test_component_types,
-            'delta_t_flir_air': X_test[:, 0],  # First column is delta_t_flir_air
-            'actual_sand_delta_t': y_test,
-            'predicted_sand_delta_t': y_pred,
-            'residual': y_test - y_pred,
-            'abs_error': np.abs(y_test - y_pred)
-        })
-        
-        # Calculate validation metrics
-        val_metrics = {
-            'R²': r2_score(y_test, y_pred),
-            'RMSE': np.sqrt(mean_squared_error(y_test, y_pred)),
-            'MAE': mean_absolute_error(y_test, y_pred),
-            'n_samples': len(y_test)
-        }
-        
-        if self.verbose:
-            print(f"\n[VALIDATION METRICS]")
-            print(f"  R² Score:  {val_metrics['R²']:.4f}")
-            print(f"  RMSE:      {val_metrics['RMSE']:.2f} °C")
-            print(f"  MAE:       {val_metrics['MAE']:.2f} °C")
-            print(f"  Samples:   {val_metrics['n_samples']}")
-        
-        return results, val_metrics, y_test, y_pred, test_component_types
-
-
-def load_pretrained_model(model_path: str) -> Dict:
-    """
-    Load pretrained model from pickle file.
+    Provides UI menu for model selection and orchestrates training.
     
     Args:
-        model_path: Path to .pkl model file
+        session_dir: Current session output directory (e.g., outputs/0115_1430_P1-7/)
+        config: Configuration dictionary from JSON config file
+        board_name: Board identifier ('HBridge', 'LoadShedding', etc.)
     
     Returns:
-        Dictionary with model data (intercept, coefficients, feature_names, etc.)
+        Dictionary with model results and paths
     """
-    with open(model_path, 'rb') as f:
-        model_data = pickle.load(f)
+    print("\n" + "="*80)
+    print("PHASE 8: MACHINE LEARNING MODEL TRAINING")
+    print("="*80)
+    print("\nAvailable Options:")
+    print("  [1] Train U-Net CNN (spatial thermal prediction)")
+    print("  [2] Evaluate existing model (quick test - no training)")
+    print("  [3] Skip Phase 8")
+    print("\nNote: Training U-Net CNN requires ~30-60 minutes for initial training")
+    print("      Evaluation runs in ~1-2 minutes on existing model")
     
-    return model_data
-
-
-def predict_with_model(model_data: Dict, flir_delta_t: float, component_type: str) -> float:
-    """
-    Make prediction using loaded sklearn model.
+    choice = input("\nYour choice (1-3) [default: 3]: ").strip() or '3'
     
-    Args:
-        model_data: Model dictionary from load_pretrained_model()
-        flir_delta_t: FLIR air temperature rise (°C)
-        component_type: Component type (e.g., 'IC', 'Resistor')
+    results = {}
     
-    Returns:
-        Predicted sand delta T (°C)
-    """
-    # Build feature vector
-    features = [flir_delta_t]
-    for comp_type in model_data['component_types']:
-        features.append(1.0 if comp_type == component_type else 0.0)
+    if choice == '1':
+        print("\n▶ Training U-Net CNN...")
+        results['unet'] = run_unet_cnn(session_dir, config, board_name)
     
-    X = np.array([features])
+    elif choice == '2':
+        print("\n▶ Evaluating existing model...")
+        results['evaluation'] = evaluate_existing_model(session_dir, config, board_name)
     
-    # Predict using sklearn model
-    y_pred = model_data['model'].predict(X)
-    
-    return y_pred[0]
-
-
-def validate_cross_board(
-    trained_model_path: str,
-    calibration_db_path: str,
-    test_pcb: str,
-    output_dir: str,
-    verbose: bool = True
-) -> Dict:
-    """
-    Validate trained model on different PCB (cross-board validation).
-    
-    Loads model trained on one board, predicts temperatures on another board,
-    and compares to actual measurements for validation.
-    
-    Args:
-        trained_model_path: Path to trained model .pkl file
-        calibration_db_path: Path to thermal_calibration_points.csv
-        test_pcb: PCB name to test on (e.g., "HBridge", "Load_Shedding")
-        output_dir: Directory for validation output files
-        verbose: Enable verbose output
-    
-    Returns:
-        Dictionary with predictions, metrics, and output file paths
-    """
-    output_path = Path(output_dir)
-    output_path.mkdir(parents=True, exist_ok=True)
-    
-    if verbose:
-        print(f"\n{'='*80}")
-        print(f"[PHASE 8 - CROSS-BOARD VALIDATION]")
-        print(f"{'='*80}")
-        print(f"Trained model: {trained_model_path}")
-        print(f"Test PCB: {test_pcb}")
-        print(f"Calibration data: {calibration_db_path}")
-        print(f"{'='*80}\n")
-    
-    # Load trained model
-    if verbose:
-        print(f"[1] Loading trained model...")
-    
-    with open(trained_model_path, 'rb') as f:
-        model_data = pickle.load(f)
-    
-    model = model_data['model']
-    feature_names = model_data['feature_names']
-    component_types = model_data['component_types']
-    training_metrics = model_data.get('metrics', {})
-    
-    if verbose:
-        print(f"  Model loaded: {len(feature_names)} features")
-        print(f"  Training R²: {training_metrics.get('R²', 'N/A'):.4f}" if 'R²' in training_metrics else "")
-    
-    # Load calibration database
-    if verbose:
-        print(f"\n[2] Loading test board calibration data...")
-    
-    df_cal = pd.read_csv(calibration_db_path)
-    
-    # Filter to test PCB
-    initial_count = len(df_cal)
-    
-    # Flexible PCB filtering (handle "Load_Shedding" matching "Load" in board_name)
-    filter_parts = test_pcb.split('_')
-    if 'board_name' in df_cal.columns:
-        mask = df_cal['board_name'].apply(
-            lambda x: any(part in str(x) for part in filter_parts)
-        )
-        df_test = df_cal[mask].copy()
-    elif 'pcb' in df_cal.columns:
-        mask = df_cal['pcb'].apply(
-            lambda x: any(part in str(x) for part in filter_parts)
-        )
-        df_test = df_cal[mask].copy()
     else:
-        raise ValueError("Calibration database missing board_name or pcb column")
+        print("\n⏭️  Skipping Phase 8 (ML training)")
+        return {'skipped': True}
     
-    if verbose:
-        print(f"  Total calibration points: {initial_count}")
-        print(f"  Filtered to {test_pcb}: {len(df_test)} points")
+    return results
+
+
+def archive_old_models(results_dir: Path) -> None:
+    """
+    Archive old model files before new training to keep results/ clean.
     
-    # Remove rows without sand data
-    df_test = df_test.dropna(subset=['sand_ss']).copy()
+    Moves .keras model files and training history to archive subfolder.
     
-    if len(df_test) == 0:
-        raise ValueError(f"No valid test data for {test_pcb} after filtering")
+    Args:
+        results_dir: Path to results directory
+    """
+    from datetime import datetime
     
-    if verbose:
-        print(f"  Valid test samples (with sand data): {len(df_test)}")
+    if not results_dir.exists():
+        return
     
-    # Calculate delta T for test board (same method as training)
-    if verbose:
-        print(f"\n[3] Calculating delta T for test samples...")
+    # Create archive folder with timestamp
+    archive_date = datetime.now().strftime("%Y%m%d")
+    archive_dir = results_dir / f"archive_{archive_date}"
     
-    # Check if initial temperature columns exist
-    has_initial_temps = 'air_initial' in df_test.columns and 'sand_initial' in df_test.columns
+    # Find old model files
+    model_files = list(results_dir.glob("*.keras"))
+    history_files = list(results_dir.glob("training_history_*.npz"))
+    curve_files = list(results_dir.glob("training_curves_*.png"))
     
-    if not has_initial_temps and verbose:
-        print("  Warning: air_initial and sand_initial columns not found.")
-        print("  Using legacy method (steady-state minimum as ambient).")
+    files_to_archive = model_files + history_files + curve_files
     
-    test_deltas = []
+    if files_to_archive:
+        archive_dir.mkdir(parents=True, exist_ok=True)
+        
+        archived_count = 0
+        for file in files_to_archive:
+            dest = archive_dir / file.name
+            if not dest.exists():  # Don't overwrite if already archived
+                shutil.move(str(file), str(dest))
+                archived_count += 1
+        
+        if archived_count > 0:
+            print(f"  ℹ️  Archived {archived_count} old model files to: {archive_dir.name}")
+
+
+def validate_dataset(dataset_file: Path) -> Dict:
+    """
+    Validate HDF5 dataset quality before training.
     
-    for test_session, test_group in df_test.groupby('test_session'):
-        # Calculate delta T for each component
-        for _, row in test_group.iterrows():
-            if has_initial_temps:
-                # NEW METHOD: Use initial temperatures as ambient baseline
-                delta_t_air = row['air_ss'] - row['air_initial']
-                delta_t_sand = row['sand_ss'] - row['sand_initial']
-                delta_t_flir_air = delta_t_air
-            else:
-                # LEGACY METHOD: Use minimum steady-state as ambient (INCORRECT)
-                ambient_air = test_group['air_ss'].min()
-                ambient_sand = test_group['sand_ss'].min()
-                delta_t_air = row['air_ss'] - ambient_air
-                delta_t_sand = row['sand_ss'] - ambient_sand
-                delta_t_flir_air = delta_t_air
+    Checks:
+    - File exists and is readable
+    - Shape consistency (FLIR frames vs thermistor samples)
+    - Temperature range sanity (20-150°C)
+    - ROI mask coverage
+    - Time alignment quality
+    
+    Args:
+        dataset_file: Path to HDF5 dataset
+    
+    Returns:
+        Dictionary with 'valid' flag and list of 'issues'
+    """
+    issues = []
+    
+    try:
+        import h5py
+        import numpy as np
+        
+        with h5py.File(dataset_file, 'r') as f:
+            # Check required keys exist
+            required_keys = ['flir_frames', 'sand_temps', 'roi_masks', 'timestamps']
+            for key in required_keys:
+                if key not in f:
+                    issues.append(f"Missing required dataset key: {key}")
             
-            test_deltas.append({
-                'component': row['component_name'],
-                'component_type': row['component_type'],
-                'delta_t_flir_air': delta_t_flir_air,
-                'delta_t_sand': delta_t_sand,
-                'test_session': test_session
-            })
-    
-    df_test_features = pd.DataFrame(test_deltas)
-    
-    if verbose:
-        print(f"  Test samples prepared: {len(df_test_features)}")
-        print(f"  Component types: {df_test_features['component_type'].unique()}")
-    
-    # Prepare feature matrix (same one-hot encoding as training)
-    if verbose:
-        print(f"\n[4] Preparing feature matrix...")
-    
-    X_test_list = []
-    
-    for _, row in df_test_features.iterrows():
-        features = [row['delta_t_flir_air']]
+            if issues:
+                return {'valid': False, 'issues': issues}
+            
+            # Get shapes
+            flir_shape = f['flir_frames'].shape
+            temps_shape = f['sand_temps'].shape
+            masks_shape = f['roi_masks'].shape
+            times_shape = f['timestamps'].shape
+            
+            print(f"    FLIR frames: {flir_shape}")
+            print(f"    Thermistor temps: {temps_shape}")
+            print(f"    ROI masks: {masks_shape}")
+            print(f"    Timestamps: {times_shape}")
+            
+            # Check shape consistency
+            n_frames = flir_shape[0]
+            
+            # Check if dataset uses frame_indices (allows fewer frames than timestamps)
+            uses_frame_indices = False
+            if 'metadata' in f and 'uses_frame_indices' in f['metadata'].attrs:
+                uses_frame_indices = f['metadata'].attrs['uses_frame_indices']
+            
+            # Only flag shape mismatch if NOT using frame_indices
+            if not uses_frame_indices:
+                if temps_shape[0] != n_frames:
+                    issues.append(f"Shape mismatch: {n_frames} FLIR frames but {temps_shape[0]} thermistor samples")
+                
+                if times_shape[0] != n_frames:
+                    issues.append(f"Shape mismatch: {n_frames} FLIR frames but {times_shape[0]} timestamps")
+            else:
+                # Using frame_indices - this is expected for extended steady-state datasets
+                print(f"    Using frame_indices: {n_frames} frames mapped to {times_shape[0]} timestamps")
+            
+            # Check temperature ranges (sample first frame)
+            if n_frames > 0:
+                sample_flir = f['flir_frames'][0]
+                sample_temps = f['sand_temps'][0]
+                
+                flir_min, flir_max = np.min(sample_flir), np.max(sample_flir)
+                temps_min, temps_max = np.min(sample_temps), np.max(sample_temps)
+                
+                print(f"    FLIR temp range: {flir_min:.1f}°C to {flir_max:.1f}°C")
+                print(f"    Thermistor range: {temps_min:.1f}°C to {temps_max:.1f}°C")
+                
+                # Sanity checks (typical PCB temps: 20-150°C)
+                if flir_min < 0 or flir_max > 200:
+                    issues.append(f"FLIR temperatures out of range: {flir_min:.1f} to {flir_max:.1f}°C")
+                
+                if temps_min < 0 or temps_max > 200:
+                    issues.append(f"Thermistor temperatures out of range: {temps_min:.1f} to {temps_max:.1f}°C")
+            
+            # Check ROI mask coverage (check ALL components, not just first)
+            if masks_shape[0] > 0:
+                all_masks = f['roi_masks'][:]
+                n_roi_pixels = np.sum(all_masks > 0)
+                total_pixels = all_masks.shape[1] * all_masks.shape[2]
+                coverage = 100 * n_roi_pixels / total_pixels
+                
+                print(f"    ROI coverage: {n_roi_pixels}/{total_pixels} pixels ({coverage:.2f}%)")
+                
+                if n_roi_pixels == 0:
+                    issues.append("ROI masks have zero coverage (no pixels marked)")
+                elif coverage < 0.05:
+                    issues.append(f"Very low ROI coverage ({coverage:.2f}%) - check pixel map")
+            
+            # Check metadata if available
+            if 'metadata' in f:
+                print(f"    Metadata keys: {list(f['metadata'].attrs.keys())})")
         
-        # One-hot encode component type (use same order as training)
-        for comp_type in component_types:
-            features.append(1.0 if row['component_type'] == comp_type else 0.0)
+        return {'valid': len(issues) == 0, 'issues': issues}
         
-        X_test_list.append(features)
+    except Exception as e:
+        return {'valid': False, 'issues': [f"Failed to read dataset: {e}"]}
+
+
+def run_unet_cnn(session_dir: Path, config: Dict, board_name: str) -> Dict:
+    """
+    Run U-Net CNN training using ml_model/cnn_thermal_modeling/.
     
-    X_test = np.array(X_test_list)
-    y_test = df_test_features['delta_t_sand'].values
+    Steps:
+    1. Verify required inputs (FLIR frames, thermistor CSV, ROI map)
+    2. Build HDF5 dataset (with median filtering if enabled)
+    3. Train model or use existing
+    4. Generate predictions
+    5. Import results back to session outputs/
     
-    if verbose:
-        print(f"  Feature matrix: {X_test.shape}")
-        print(f"  Target vector: {y_test.shape}")
+    Args:
+        session_dir: Current session output directory
+        config: Configuration dictionary
+        board_name: Board identifier
     
-    # Make predictions
-    if verbose:
-        print(f"\n[5] Making predictions...")
+    Returns:
+        Dictionary with model results
+    """
+    # Get paths
+    project_root = Path(__file__).parent
     
-    y_pred = model.predict(X_test)
+    # Try to find the FLIR folder - check multiple patterns
+    # Priority: Prefer _15s_filtered > _filtered > _15s > raw
+    # Pattern 1: ResearchIR_Outputs_{board_name}_15s_filtered (BEST - filtered with 15s suffix)
+    # Pattern 2: ResearchIR_Outputs_{board_name}_filtered (filtered without suffix)
+    # Pattern 3: ResearchIR_Outputs_{board_name}_15s (raw with 15s suffix)
+    # Pattern 4: ResearchIR_Outputs_{board_name} (raw)
     
-    # Calculate validation metrics
-    val_metrics = {
-        'R²': r2_score(y_test, y_pred),
-        'RMSE': np.sqrt(mean_squared_error(y_test, y_pred)),
-        'MAE': mean_absolute_error(y_test, y_pred),
-        'n_samples': len(y_test),
-        'train_R²': training_metrics.get('R²', np.nan),
-        'train_RMSE': training_metrics.get('RMSE', np.nan),
-        'train_MAE': training_metrics.get('MAE', np.nan)
-    }
+    flir_folder = None
+    potential_folders = [
+        project_root / "inputs" / f"ResearchIR_Outputs_{board_name}_15s_filtered",
+        project_root / "inputs" / f"ResearchIR_Outputs_{board_name}_filtered",
+        project_root / "inputs" / f"ResearchIR_Outputs_{board_name}_15s",
+        project_root / "inputs" / f"ResearchIR_Outputs_{board_name}",
+    ]
     
-    if verbose:
-        print(f"\n[VALIDATION RESULTS]")
-        print(f"  Test R²:      {val_metrics['R²']:.4f}")
-        print(f"  Test RMSE:    {val_metrics['RMSE']:.2f} °C")
-        print(f"  Test MAE:     {val_metrics['MAE']:.2f} °C")
-        print(f"  Samples:      {val_metrics['n_samples']}")
-        
-        if not np.isnan(val_metrics['train_R²']):
-            r2_degradation = val_metrics['train_R²'] - val_metrics['R²']
-            print(f"\n[GENERALIZATION]")
-            print(f"  Training R²:  {val_metrics['train_R²']:.4f}")
-            print(f"  Test R²:      {val_metrics['R²']:.4f}")
-            print(f"  Degradation:  {r2_degradation:.4f} ({r2_degradation/val_metrics['train_R²']*100:.1f}%)")
+    for folder in potential_folders:
+        if folder.exists():
+            flir_folder = folder
+            if "_filtered" in folder.name:
+                print(f"  ✓ Using filtered FLIR frames: {flir_folder.name}")
+            else:
+                print(f"  ⚠️ Using raw FLIR frames: {flir_folder.name}")
+                print(f"    TIP: Run 'Filter FLIR frames' from pre-processing menu for better results")
+            break
     
-    # Calculate percent errors
-    # For components with very small delta T (<1°C), percent error is not meaningful
-    # Use a minimum threshold to avoid astronomical percent errors
-    MIN_DELTA_T_FOR_PERCENT = 1.0  # Only calculate % error for delta T >= 1°C
+    if flir_folder is None:
+        raise FileNotFoundError(f"FLIR folder not found for board '{board_name}'. Checked: {[f.name for f in potential_folders]}")
     
-    # Calculate percent errors (only for components above threshold)
-    percent_errors = np.zeros_like(y_test)
-    abs_percent_errors = np.zeros_like(y_test)
-    valid_for_percent = np.abs(y_test) >= MIN_DELTA_T_FOR_PERCENT
+    # Check for thermistor data - USE SAND (full 36-hour dataset for prediction)
+    thermistor_csv = session_dir / f"{board_name}_15s_thermistor_timeseries.csv"
+    if not thermistor_csv.exists():
+        raise FileNotFoundError(f"Thermistor CSV not found: {thermistor_csv}")
     
-    if np.any(valid_for_percent):
-        percent_errors[valid_for_percent] = ((y_pred[valid_for_percent] - y_test[valid_for_percent]) / y_test[valid_for_percent]) * 100
-        abs_percent_errors[valid_for_percent] = np.abs(percent_errors[valid_for_percent])
+    # Check for ROI pixel map - PRIORITY: Use SROI-generated canonical version first
+    canonical_roi_map = project_root / "outputs" / "roi_pixel_maps" / f"{board_name}_roi_pixel_map.csv"
+    session_roi_map = session_dir / f"{board_name}_15s_roi_pixel_map.csv"
     
-    # For low delta T components, mark as NaN (not applicable)
-    percent_errors[~valid_for_percent] = np.nan
-    abs_percent_errors[~valid_for_percent] = np.nan
-    
-    # Build results dataframe
-    results_df = df_test_features.copy()
-    results_df['predicted_sand_delta_t'] = y_pred
-    results_df['residual'] = y_test - y_pred
-    results_df['abs_error'] = np.abs(y_test - y_pred)
-    results_df['percent_error'] = percent_errors
-    results_df['abs_percent_error'] = abs_percent_errors
-    results_df['within_10pct'] = abs_percent_errors <= 10
-    results_df['within_20pct'] = abs_percent_errors <= 20
-    
-    # Export predictions CSV
-    predictions_file = output_path / f"{test_pcb}_ml_validation_predictions.csv"
-    results_df.to_csv(predictions_file, index=False)
-    
-    if verbose:
-        print(f"\n[6] Exporting results...")
-        print(f"  Saved predictions: {predictions_file}")
-    
-    # Export detailed errors CSV
-    detailed_errors_file = output_path / f"{test_pcb}_ml_validation_detailed_errors.csv"
-    results_df.to_csv(detailed_errors_file, index=False)
-    
-    if verbose:
-        print(f"  Saved detailed errors: {detailed_errors_file}")
-    
-    # Calculate and export error summary statistics (excluding NaN values from low delta T)
-    valid_percent_mask = ~np.isnan(percent_errors)
-    n_valid_percent = np.sum(valid_percent_mask)
-    
-    if n_valid_percent > 0:
-        error_summary = {
-            'Mean_Percent_Error': np.nanmean(percent_errors),
-            'Std_Percent_Error': np.nanstd(percent_errors),
-            'Median_Percent_Error': np.nanmedian(percent_errors),
-            'MAPE': np.nanmean(abs_percent_errors),
-            'Components_Analyzed': f"{n_valid_percent}/{len(y_test)}",
-            'Components_Below_Threshold': f"{len(y_test) - n_valid_percent} (ΔT < {MIN_DELTA_T_FOR_PERCENT}°C)",
-            'Components_Within_10pct': f"{np.nansum(abs_percent_errors <= 10)}/{n_valid_percent}",
-            'Percent_Within_10pct': f"{np.nansum(abs_percent_errors <= 10) / n_valid_percent * 100:.1f}%",
-            'Components_Within_20pct': f"{np.nansum(abs_percent_errors <= 20)}/{n_valid_percent}",
-            'Percent_Within_20pct': f"{np.nansum(abs_percent_errors <= 20) / n_valid_percent * 100:.1f}%",
-            'Max_Error_Component': df_test_features['component'].iloc[np.nanargmax(abs_percent_errors)],
-            'Max_Error_Value': f"{np.nanmax(abs_percent_errors):.1f}%"
-        }
+    if canonical_roi_map.exists():
+        roi_map = canonical_roi_map
+        print(f"  ✓ Using canonical ROI pixel map from SROI pipeline: {canonical_roi_map.name}")
+    elif session_roi_map.exists():
+        roi_map = session_roi_map
+        print(f"  ⚠️  Using session-specific ROI pixel map: {session_roi_map.name}")
+        print(f"     (Canonical version not found at: {canonical_roi_map})")
     else:
-        # All components below threshold
-        error_summary = {
-            'Mean_Percent_Error': 'N/A',
-            'Std_Percent_Error': 'N/A',
-            'Median_Percent_Error': 'N/A',
-            'MAPE': 'N/A',
-            'Components_Analyzed': f"0/{len(y_test)}",
-            'Components_Below_Threshold': f"{len(y_test)} (all below {MIN_DELTA_T_FOR_PERCENT}°C)",
-            'Components_Within_10pct': 'N/A',
-            'Percent_Within_10pct': 'N/A',
-            'Components_Within_20pct': 'N/A',
-            'Percent_Within_20pct': 'N/A',
-            'Max_Error_Component': 'N/A',
-            'Max_Error_Value': 'N/A'
-        }
+        print(f"  ⚠️  ROI pixel map not found in canonical location: {canonical_roi_map.name}")
+        print(f"  ⚠️  ROI pixel map not found in session location: {session_roi_map.name}")
+        print(f"  ▶  Generating ROI pixel map from component coordinates (may have incorrect PCB corners)...")
+        
+        # Generate it using the standalone script logic
+        component_csv = project_root / "inputs" / f"{board_name.lower()}_pcb_components_enhanced.csv"
+        if not component_csv.exists():
+            raise FileNotFoundError(
+                f"Component CSV not found: {component_csv}\n"
+                f"  Cannot generate ROI pixel map"
+            )
+        
+        # Import and run pixel map generator
+        sys.path.insert(0, str(project_root))
+        from generate_roi_pixel_map import generate_roi_pixel_map
+        
+        generate_roi_pixel_map(
+            str(component_csv),
+            str(roi_map),
+            pcb_bounds=(0, 0, 100, 80),
+            image_shape=(480, 640),
+            roi_radius=5
+        )
     
-    error_summary_file = output_path / f"{test_pcb}_ml_validation_error_summary.csv"
-    error_summary_df = pd.DataFrame([error_summary])
-    error_summary_df.to_csv(error_summary_file, index=False)
+    print("\n  ✓ All required inputs found")
+    print(f"    FLIR frames: {flir_folder}")
+    print(f"    Thermistor CSV: {thermistor_csv}")
+    print(f"    ROI map: {roi_map}")
     
-    if verbose:
-        print(f"  Saved error summary: {error_summary_file}")
-        if n_valid_percent > 0:
-            print(f"\n[PERCENT ERROR ANALYSIS] ({n_valid_percent}/{len(y_test)} components with ΔT >= {MIN_DELTA_T_FOR_PERCENT}°C)")
-            print(f"  Mean Error:       {error_summary['Mean_Percent_Error']:+.1f}%")
-            print(f"  Median Error:     {error_summary['Median_Percent_Error']:+.1f}%")
-            print(f"  MAPE:             {error_summary['MAPE']:.1f}%")
-            print(f"  Within ±10%:      {error_summary['Components_Within_10pct']} ({error_summary['Percent_Within_10pct']})")
-            print(f"  Within ±20%:      {error_summary['Components_Within_20pct']} ({error_summary['Percent_Within_20pct']})")
-            print(f"  Worst prediction: {error_summary['Max_Error_Component']} ({error_summary['Max_Error_Value']})")
+    # Add ml_model/cnn_thermal_modeling to path
+    ml_path = project_root / "ml_model" / "cnn_thermal_modeling"
+    sys.path.insert(0, str(ml_path))
+    
+    # Import CNN modules
+    try:
+        import build_hbridge_dataset
+        import train_hbridge_model
+        # import generate_predictions  # If available
+    except ImportError as e:
+        raise ImportError(
+            f"Failed to import CNN modules: {e}\n"
+            f"  Check ml_model/cnn_thermal_modeling/ exists"
+        )
+    
+    # Build dataset (if needed)
+    dataset_file = ml_path / "datasets" / "HBridge_cnn_dataset.h5"
+    if dataset_file.exists():
+        print(f"\n  ✓ Found existing dataset: {dataset_file.name}")
+        print("\n    [1] Use existing dataset")
+        print("    [2] Rebuild dataset")
+        rebuild_choice = input("\n    Select option [1-2] (default: 1): ").strip()
+        rebuild = (rebuild_choice == '2')
+    else:
+        rebuild = True
+    
+    if rebuild:
+        print("\n  ▶ Building CNN dataset...")
+        print("    (This loads all FLIR frames into memory - may take a few minutes)")
+        
+        # Pass current session paths to dataset builder
+        build_hbridge_dataset.build_hbridge_dataset(
+            flir_folder=str(flir_folder),
+            thermistor_csv=str(thermistor_csv),
+            pixel_map_csv=str(roi_map),
+            output_h5=str(dataset_file)
+        )
+        
+        # Validate dataset after building
+        print("\n  ▶ Validating dataset...")
+        validation = validate_dataset(dataset_file)
+        
+        if not validation['valid']:
+            print("\n  ⚠️ WARNING: Dataset validation issues detected:")
+            for issue in validation['issues']:
+                print(f"    - {issue}")
+            
+            proceed = input("    Continue anyway? (y/n) [default: n]: ").strip().lower()
+            if proceed != 'y':
+                raise RuntimeError("Dataset validation failed. Aborting training.")
         else:
-            print(f"\n[PERCENT ERROR ANALYSIS] All components have ΔT < {MIN_DELTA_T_FOR_PERCENT}°C - using absolute error instead")
+            print("  ✓ Dataset validation passed!")
     
-    # Export metrics CSV
-    metrics_file = output_path / f"{test_pcb}_ml_validation_metrics.csv"
-    metrics_df = pd.DataFrame([val_metrics])
-    metrics_df.to_csv(metrics_file, index=False)
+    # Train or use existing model
+    model_file = ml_path / "models" / "thermal_unet_model.keras"
+    if model_file.exists():
+        print(f"\n  ✓ Found existing model: {model_file.name}")
+        retrain = input("    Retrain model? (y/n) [default: n]: ").strip().lower() == 'y'
+    else:
+        retrain = True
     
-    if verbose:
-        print(f"  Saved metrics: {metrics_file}")
+    if retrain:
+        print("\n  ▶ Training U-Net model...")
+        print("    ⏱️  This may take 30-60 minutes depending on hardware")
+        print("    ⏸️  You can press Ctrl+C to stop and use existing model later")
+        
+        # Archive old models before training (Priority 3)
+        archive_old_models(ml_path / "results")
+        
+        # Save training manifest (Priority 2)
+        training_start = datetime.now()
+        manifest = {
+            'training_timestamp': training_start.isoformat(),
+            'session_dir': str(session_dir),
+            'flir_folder': str(flir_folder),
+            'thermistor_csv': str(thermistor_csv),
+            'roi_map': str(roi_map),
+            'dataset_file': str(dataset_file),
+            'board_name': board_name,
+            'config': {k: str(v) for k, v in config.items() if k != 'debug'}
+        }
+        
+        manifest_file = ml_path / "results" / "training_manifest.json"
+        with open(manifest_file, 'w') as f:
+            json.dump(manifest, f, indent=2)
+        print(f"\n  ✓ Saved training manifest: {manifest_file.name}")
+        
+        try:
+            train_hbridge_model.main()
+            training_end = datetime.now()
+        except KeyboardInterrupt:
+            print("\n  ⏸️  Training interrupted. Using existing model (if available)")
+            training_end = None
+            if not model_file.exists():
+                raise RuntimeError("No existing model found. Cannot continue without training.")
     
-    # Return results
+    # Generate predictions (if module available)
+    print("\n  ▶ Generating predictions...")
+    # try:
+    #     import generate_predictions
+    #     generate_predictions.main()
+    # except ImportError:
+    #     print("    ⚠️ generate_predictions.py not found. Skipping prediction generation.")
+    
+    # Import results to main pipeline outputs
+    print("\n  ▶ Importing results to session outputs...")
+    results_dir = import_cnn_results(session_dir, ml_path, training_start if retrain else None)
+    
     return {
-        'predictions': results_df,
-        'metrics': val_metrics,
-        'error_summary': error_summary,
-        'y_true': y_test,
-        'y_pred': y_pred,
-        'component_types': df_test_features['component_type'].values,
-        'component_names': df_test_features['component'].values,
-        'predictions_file': str(predictions_file),
-        'metrics_file': str(metrics_file)
+        'model_type': 'unet_cnn',
+        'model_file': str(model_file),
+        'dataset_file': str(dataset_file),
+        'results_dir': str(results_dir),
+        'board_name': board_name
     }
+
+
+def import_cnn_results(session_dir: Path, ml_path: Path, training_timestamp=None) -> Path:
+    """
+    Copy ML model results to main pipeline outputs (smart filtering).
+    
+    Only copies files from the current training run, not old results.
+    
+    Args:
+        session_dir: Current session output directory
+        ml_path: Path to ml_model/cnn_thermal_modeling/
+        training_timestamp: Timestamp when training started (if None, copy all recent files)
+    
+    Returns:
+        Path to imported results directory
+    """
+    from datetime import datetime, timedelta
+    import os
+    
+    ml_results = ml_path / "results"
+    
+    # Create timestamped results subfolder
+    timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S")
+    phase8_dir = session_dir / "phase8_ml_results" / f"run_{timestamp_str}"
+    phase8_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Determine cutoff time for "recent" files
+    if training_timestamp:
+        # Only copy files created after training started
+        cutoff_time = training_timestamp
+        print(f"  ℹ️  Copying files created after {cutoff_time.strftime('%Y-%m-%d %H:%M:%S')}")
+    else:
+        # Copy files from last 24 hours
+        cutoff_time = datetime.now() - timedelta(hours=24)
+        print(f"  ℹ️  Copying files from last 24 hours")
+    
+    # Copy result files if they exist
+    if ml_results.exists():
+        copied_count = 0
+        skipped_count = 0
+        copied_files = []
+        
+        for file in ml_results.glob("*"):
+            if file.is_file():
+                # Get file modification time
+                file_mtime = datetime.fromtimestamp(file.stat().st_mtime)
+                
+                # Only copy recent files
+                if file_mtime >= cutoff_time:
+                    shutil.copy2(file, phase8_dir / file.name)
+                    copied_files.append(file.name)
+                    copied_count += 1
+                else:
+                    skipped_count += 1
+        
+        if copied_count > 0:
+            print(f"  ✓ Imported {copied_count} result files (skipped {skipped_count} old files)")
+            print(f"    Location: {phase8_dir.relative_to(session_dir.parent.parent)}")
+            
+            # Create manifest of what was copied
+            manifest_path = phase8_dir / "results_manifest.txt"
+            with open(manifest_path, 'w') as f:
+                f.write(f"Phase 8 ML Results - Run {timestamp_str}\n")
+                f.write(f"{'='*60}\n\n")
+                f.write(f"Training timestamp: {training_timestamp or 'N/A'}\n")
+                f.write(f"Import timestamp: {datetime.now().isoformat()}\n")
+                f.write(f"Files copied: {copied_count}\n")
+                f.write(f"Files skipped (old): {skipped_count}\n\n")
+                f.write(f"Copied files:\n")
+                for fname in sorted(copied_files):
+                    f.write(f"  - {fname}\n")
+            
+            print(f"  ✓ Created results manifest: results_manifest.txt")
+        else:
+            print(f"  ⚠️ No recent result files found in {ml_results}")
+    else:
+        print(f"  ⚠️ Results directory not found: {ml_results}")
+    
+    return phase8_dir
+
+
+def evaluate_existing_model(session_dir: Path, config: Dict, board_name: str) -> Dict:
+    """
+    Evaluate existing trained model without retraining.
+    
+    Quick evaluation on existing model - useful for testing or re-validation.
+    
+    Args:
+        session_dir: Current session output directory
+        config: Configuration dictionary
+        board_name: Board identifier
+    
+    Returns:
+        Dictionary with evaluation results
+    """
+    print("\n" + "="*80)
+    print("EVALUATING EXISTING MODEL")
+    print("="*80)
+    
+    # Get paths
+    project_root = Path(__file__).parent
+    ml_path = project_root / "ml_model" / "cnn_thermal_modeling"
+    
+    # Look for most recent model in results/analysis_* folders
+    results_dir = ml_path / "results"
+    analysis_folders = sorted(results_dir.glob("analysis_*"), key=lambda p: p.name, reverse=True)
+    
+    model_file = None
+    for folder in analysis_folders:
+        candidate = folder / "unet_hbridge.keras"
+        if candidate.exists():
+            model_file = candidate
+            break
+    
+    dataset_file = ml_path / "datasets" / "HBridge_cnn_dataset.h5"
+    
+    if model_file is None:
+        print(f"\n❌ No trained model found in {results_dir / 'analysis_*'}")
+        print("   Run option 1 to train a model first.")
+        return {'status': 'failed', 'reason': 'no_model'}
+    
+    if not dataset_file.exists():
+        print(f"\n❌ No dataset found: {dataset_file}")
+        print("   Run option 1 to build dataset and train model.")
+        return {'status': 'failed', 'reason': 'no_dataset'}
+    
+    print(f"\n  ✓ Found model: {model_file.relative_to(ml_path)}")
+    print(f"  ✓ Found dataset: {dataset_file.name}")
+    
+    # Import evaluation module
+    sys.path.insert(0, str(ml_path))
+    try:
+        import train_hbridge_model
+    except ImportError as e:
+        print(f"\n❌ Failed to import evaluation module: {e}")
+        return {'status': 'failed', 'reason': 'import_error'}
+    
+    # Load model
+    print("\n  ▶ Loading model...")
+    sys.path.insert(0, str(project_root))
+    from phase8c_spatial_cnn import SpatialCNNTrainer
+    
+    trainer = SpatialCNNTrainer(verbose=True)
+    trainer.load_dataset(str(dataset_file))
+    
+    # Build model architecture (needed before loading weights)
+    trainer.build_model(learning_rate=0.001)
+    
+    # Load trained weights
+    trainer.model.load_weights(str(model_file))
+    print(f"  ✓ Loaded weights from: {model_file.name}")
+    
+    # Run evaluation
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    output_dir = ml_path / "results" / f"evaluation_{timestamp}"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    
+    print(f"\n  ▶ Running evaluation (this may take 1-2 minutes)...")
+    r2, rmse, mae = train_hbridge_model.evaluate_model(trainer, dataset_file, output_dir)
+    
+    if r2 is None:
+        print("\n❌ Evaluation failed (likely empty ROI masks)")
+        return {'status': 'failed', 'reason': 'evaluation_error'}
+    
+    print("\n" + "="*80)
+    print("EVALUATION RESULTS")
+    print("="*80)
+    print(f"\nModel Performance:")
+    print(f"  R² Score: {r2:.4f}")
+    print(f"  RMSE: {rmse:.2f}°C")
+    print(f"  MAE: {mae:.2f}°C")
+    print(f"\nResults saved to: {output_dir.relative_to(project_root)}")
+    
+    # Import results
+    results_dir = import_cnn_results(session_dir, ml_path, None)
+    
+    return {
+        'status': 'success',
+        'model_type': 'unet_cnn',
+        'model_file': str(model_file),
+        'r2_score': r2,
+        'rmse': rmse,
+        'mae': mae,
+        'results_dir': str(results_dir)
+    }
+
+
+def run_linear_regression(session_dir: Path, config: Dict, board_name: str) -> Dict:
+    """
+    Run legacy linear regression model.
+    
+    Args:
+        session_dir: Current session output directory
+        config: Configuration dictionary
+        board_name: Board identifier
+    
+    Returns:
+        Dictionary with model results
+    """
+    try:
+        import phase8a_linear_regression as phase8a
+        
+        # Call legacy model
+        # Note: This assumes phase8a has a compatible interface
+        # May need to adapt based on actual phase8a_linear_regression.py structure
+        print("  ⚠️ Legacy linear regression not fully integrated yet")
+        print("    File renamed to phase8a_linear_regression.py but needs interface updates")
+        
+        return {
+            'model_type': 'linear_regression',
+            'status': 'legacy_model',
+            'note': 'Not fully integrated - needs refactoring'
+        }
+    
+    except ImportError as e:
+        print(f"  ✗ Failed to import phase8a_linear_regression: {e}")
+        return {'error': str(e)}
+
+
+def compare_models(session_dir: Path, results: Dict) -> Dict:
+    """
+    Compare U-Net CNN vs Linear Regression performance.
+    
+    Args:
+        session_dir: Current session output directory
+        results: Dictionary with results from both models
+    
+    Returns:
+        Comparison metrics dictionary
+    """
+    print("\n  ▶ Comparing models...")
+    
+    comparison_dir = session_dir / "phase8_model_comparison"
+    comparison_dir.mkdir(parents=True, exist_ok=True)
+    
+    # TODO: Implement actual comparison logic
+    # - Load metrics from both models
+    # - Calculate R², RMSE, MAE
+    # - Generate comparison plots
+    # - Save to comparison_dir
+    
+    print(f"  ⚠️ Model comparison not yet implemented")
+    print(f"    Placeholder directory created: {comparison_dir}")
+    
+    return {
+        'comparison_dir': str(comparison_dir),
+        'status': 'placeholder'
+    }
+
+
+if __name__ == "__main__":
+    # Standalone test
+    print("Phase 8 ML Training Module")
+    print("This module is intended to be called from researchir_post_processor.py")
+    print("\nFor standalone testing, use:")
+    print("  python -c \"from phase8_ml_training import *; run_unet_cnn(Path('outputs/test'), {}, 'HBridge')\"")
